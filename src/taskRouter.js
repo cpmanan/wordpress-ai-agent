@@ -20,7 +20,11 @@ const FILE_KEYWORDS = [
 const CONTENT_KEYWORDS = [
   'create post', 'write post', 'new post', 'blog post',
   'create page', 'new page', 'add page', 'write page',
-  'create content', 'publish'
+  'create content', 'publish',
+  'change the', 'update the', 'edit the', 'modify the',
+  'address', 'phone', 'email', 'contact', 'text', 'content',
+  'add text', 'change text', 'update text', 'update content',
+  'page address', 'page content', 'page text'
 ];
 
 const SEO_KEYWORDS = [

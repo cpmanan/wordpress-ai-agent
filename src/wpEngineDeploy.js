@@ -13,10 +13,12 @@ const WPE_INSTALL_ID = process.env.WPENGINE_INSTALL_ID;
 const WPE_API_USER = process.env.WPENGINE_API_USER;
 const WPE_API_PASSWORD = process.env.WPENGINE_API_PASSWORD;
 
-// Write SSH private key to a temp file for git operations
+// Write SSH private key to a temp file and set GIT_SSH_COMMAND env var
 function setupSshKey() {
   const keyPath = path.join(os.tmpdir(), 'wpengine_agent_key');
   fs.writeFileSync(keyPath, process.env.SSH_PRIVATE_KEY + '\n', { mode: 0o600 });
+  // Set globally so all git operations in this process use this key
+  process.env.GIT_SSH_COMMAND = `ssh -i ${keyPath} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null`;
   return keyPath;
 }
 
@@ -25,10 +27,7 @@ async function cloneRepo() {
   const keyPath = setupSshKey();
   const cloneDir = path.join(os.tmpdir(), `theme-${Date.now()}`);
 
-  const git = simpleGit({
-    config: [`core.sshCommand=ssh -i ${keyPath} -o StrictHostKeyChecking=no`]
-  });
-
+  const git = simpleGit();
   await git.clone(REPO_URL, cloneDir, ['--branch', BRANCH]);
   return { cloneDir, keyPath };
 }
@@ -58,10 +57,8 @@ function readFile(cloneDir, relativePath) {
 
 // Commit and push to Bitbucket + WP Engine staging
 async function commitAndDeploy(cloneDir, keyPath, commitMessage) {
-  const git = simpleGit({
-    baseDir: cloneDir,
-    config: [`core.sshCommand=ssh -i ${keyPath} -o StrictHostKeyChecking=no`]
-  });
+  // GIT_SSH_COMMAND already set by setupSshKey()
+  const git = simpleGit({ baseDir: cloneDir });
 
   await git.addConfig('user.name', 'AI Agent');
   await git.addConfig('user.email', process.env.ATLASSIAN_EMAIL);
@@ -102,11 +99,7 @@ async function revertToSha(oldSha) {
   const keyPath = setupSshKey();
   const { cloneDir } = await cloneRepo();
 
-  const git = simpleGit({
-    baseDir: cloneDir,
-    config: [`core.sshCommand=ssh -i ${keyPath} -o StrictHostKeyChecking=no`]
-  });
-
+  const git = simpleGit({ baseDir: cloneDir });
   await git.addRemote('wpengine', WPE_REMOTE).catch(() => {});
   await git.push('wpengine', `${oldSha}:master`, ['--force']);
   await purgeCache();
