@@ -11,13 +11,13 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const PROJECT_KEY = process.env.JIRA_PROJECT_KEY;
 
-// Jira status column names — update these to match your exact Jira board column names
+// Exact Jira transition names (confirmed via API)
 const STATUS = {
-  INBOX:      'to do',         // new issues land here
-  IN_PROGRESS: 'in progress',  // agent working
-  IN_REVIEW:  'in review',     // agent done, awaiting your review
-  DEPLOYMENT: 'deployment',    // you drag here to approve → agent publishes
-  LIVE:       'done'           // agent moves here after publishing
+  INBOX:       'To Do',       // new issues land here
+  IN_PROGRESS: 'In Progress', // agent working
+  IN_REVIEW:   'In Review',   // agent done, awaiting your review
+  DEPLOYMENT:  'Deployment',  // you drag here to approve → agent publishes
+  LIVE:        'Done'         // agent moves here after publishing
 };
 
 // Health check

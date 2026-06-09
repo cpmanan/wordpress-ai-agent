@@ -2,7 +2,7 @@ const OpenAI = require('openai');
 const { detectTaskType, TASK_TYPES } = require('./taskRouter');
 const { getIssue, addComment, setRevertMeta, transitionIssue } = require('./jira');
 const { cloneRepo, getCurrentSha, readFile, editFile, commitAndDeploy, cleanup } = require('./wpEngineDeploy');
-const { createPost, updatePost, getPost, createPage, updatePage, getPage, searchContent } = require('./wpRest');
+const { createPost, updatePost, getPost, createPage, updatePage, getPage, searchContent, getPageBySlug, findPageByTitle } = require('./wpRest');
 const { revertTask } = require('./revert');
 
 // Initialize lazily so missing key doesn't crash the server at startup
@@ -25,7 +25,7 @@ async function runAgent(issueKey) {
   console.log(`📋 Task: ${title}`);
 
   // 2. Move to In Progress
-  await transitionIssue(issueKey, 'In Progress');
+  await transitionIssue(issueKey, 'In Progress').catch(() => {});
   await addComment(issueKey, `🤖 Agent started working on: "${title}"`);
 
   // 3. Detect task type
@@ -86,7 +86,7 @@ async function runAgent(issueKey) {
             filesChanged: fileChanges.map(f => f.file)
           });
 
-          await transitionIssue(issueKey, 'Review');
+          await transitionIssue(issueKey, 'In Review').catch(() => {});
           await addComment(issueKey,
             `✅ Theme files updated and deployed to staging.\n\n` +
             `Files changed: ${fileChanges.map(f => f.file).join(', ')}\n` +
@@ -105,51 +105,110 @@ async function runAgent(issueKey) {
 
       // ── CONTENT: Create/update posts or pages ──────────────────────
       case TASK_TYPES.CONTENT: {
-        const isPage = title.toLowerCase().includes('page');
 
-        // Search for existing content first so OpenAI knows the page ID
-        const searchResults = await searchContent(title);
-        const existingItems = searchResults
-          .slice(0, 5)
-          .map(r => `ID: ${r.id} | Type: ${r.subtype} | Title: ${r.title?.rendered || r.title}`)
-          .join('\n');
+        // Step 1 — Try to find the existing page intelligently
+        // Extract page name hint from task title (e.g. "contact", "about", "services")
+        const slugHints = title.toLowerCase().match(/\b(contact|about|services|home|pricing|blog|faq|gallery|team|booking|schedule|classes|yoga|meditation)\b/g) || [];
+        const titleWords = title.replace(/[^a-z0-9 ]/gi, ' ').split(' ').filter(w => w.length > 3);
 
-        // Ask OpenAI to generate/update the content
-        const aiResponse = await getOpenAI().chat.completions.create({
-          model: 'gpt-4o',
-          messages: [
-            {
-              role: 'system',
-              content: `You are a WordPress content editor for a yoga studio website called Brinda Yoga.
-              You will be given a task and a list of existing pages/posts found by search.
-              Return JSON: { "title": "post title", "content": "HTML content", "action": "create" or "update", "id": null or the exact post ID from the search results if updating, "type": "post" or "page" }`
-            },
-            {
-              role: 'user',
-              content: `Task: ${title}\nDescription: ${description}\n\nExisting content found:\n${existingItems || 'None found'}`
+        let existingPage = null;
+
+        // Try slug match first (most accurate)
+        for (const slug of slugHints) {
+          existingPage = await getPageBySlug(slug);
+          if (existingPage) break;
+        }
+
+        // Fall back to title search
+        if (!existingPage) {
+          const searchResults = await findPageByTitle(slugHints[0] || titleWords[0] || title);
+          if (searchResults.length > 0) existingPage = searchResults[0];
+        }
+
+        // Also try general search
+        if (!existingPage) {
+          const generalSearch = await searchContent(title);
+          if (generalSearch.length > 0) {
+            const pageResult = generalSearch.find(r => r.subtype === 'page');
+            if (pageResult) {
+              existingPage = await getPage(pageResult.id);
             }
-          ],
-          response_format: { type: 'json_object' }
-        });
+          }
+        }
 
-        const result = JSON.parse(aiResponse.choices[0].message.content);
         let savedContent = null;
-        let postId = result.id;
-        const contentIsPage = result.type === 'page' || isPage;
+        let postId = null;
+        let contentIsPage = true;
+        let action = 'create';
 
-        if (result.action === 'update' && postId) {
-          // Save existing content before update (for revert)
-          const existing = contentIsPage ? await getPage(postId) : await getPost(postId);
-          savedContent = { title: existing.title.raw, content: existing.content.raw };
+        if (existingPage) {
+          // ── UPDATE existing page ──────────────────────────────────
+          postId = existingPage.id;
+          contentIsPage = true;
+          action = 'update';
 
-          contentIsPage
-            ? await updatePage(postId, { title: result.title, content: result.content })
-            : await updatePost(postId, { title: result.title, content: result.content });
+          // Save current content for revert
+          savedContent = {
+            title: existingPage.title?.rendered || existingPage.title?.raw,
+            content: existingPage.content?.rendered || existingPage.content?.raw
+          };
+
+          const currentContent = existingPage.content?.rendered || '';
+          const currentTitle = existingPage.title?.rendered || '';
+
+          // Ask OpenAI to make ONLY the requested change — preserve everything else
+          const aiResponse = await getOpenAI().chat.completions.create({
+            model: 'gpt-4o',
+            messages: [
+              {
+                role: 'system',
+                content: `You are a precise WordPress page editor for Brinda Yoga website.
+Your job is to make ONLY the specific change requested. Do NOT rewrite or redesign the page.
+Preserve all existing HTML structure, CSS classes, design, and all other content exactly as-is.
+Only modify the specific text, address, phone number, or element mentioned in the task.
+Return JSON: { "title": "page title (unchanged unless title needs updating)", "content": "full updated HTML with ONLY the requested change made" }`
+              },
+              {
+                role: 'user',
+                content: `Task: ${title}\n\nAdditional details: ${description}\n\nCurrent page title: ${currentTitle}\n\nCurrent page HTML content:\n${currentContent}`
+              }
+            ],
+            response_format: { type: 'json_object' }
+          });
+
+          const result = JSON.parse(aiResponse.choices[0].message.content);
+
+          // Update as draft first for preview
+          await updatePage(postId, {
+            title: result.title,
+            content: result.content,
+            status: 'draft'
+          });
+
         } else {
-          // Create new
-          const created = contentIsPage
-            ? await createPage(result.title, result.content, 'draft')
-            : await createPost(result.title, result.content, 'draft');
+          // ── CREATE new page ───────────────────────────────────────
+          contentIsPage = true;
+          action = 'create';
+
+          const aiResponse = await getOpenAI().chat.completions.create({
+            model: 'gpt-4o',
+            messages: [
+              {
+                role: 'system',
+                content: `You are a WordPress content writer for Brinda Yoga, a yoga studio website.
+Write clean, well-structured HTML content that matches a professional yoga studio design.
+Return JSON: { "title": "page title", "content": "full HTML content" }`
+              },
+              {
+                role: 'user',
+                content: `Create a new page for this task: ${title}\n\nDetails: ${description}`
+              }
+            ],
+            response_format: { type: 'json_object' }
+          });
+
+          const result = JSON.parse(aiResponse.choices[0].message.content);
+          const created = await createPage(result.title, result.content, 'draft');
           postId = created.id;
         }
 
@@ -157,25 +216,25 @@ async function runAgent(issueKey) {
         await setRevertMeta(issueKey, {
           type: 'content',
           postId,
-          postType: isPage ? 'page' : 'post',
+          postType: 'page',
           savedContent,
           timestamp: new Date().toISOString()
         });
 
-        await transitionIssue(issueKey, 'Review');
-        const previewUrl = contentIsPage
-          ? `${process.env.WP_STAGING_URL}/?page_id=${postId}&preview=true`
-          : `${process.env.WP_STAGING_URL}/?p=${postId}&preview=true`;
+        // Move to In Review
+        await transitionIssue(issueKey, 'In Review').catch(() => {});
+
+        const previewUrl = `${process.env.WP_STAGING_URL}/?page_id=${postId}&preview=true`;
 
         await addComment(issueKey,
-          `✅ ${contentIsPage ? 'Page' : 'Post'} ${result.action === 'update' ? 'updated' : 'created'} as draft.\n\n` +
-          `Title: "${result.title}"\n` +
+          `✅ Page ${action === 'update' ? 'updated' : 'created'} as draft.\n\n` +
+          `${existingPage ? `Existing page found: "${existingPage.title?.rendered}"` : 'New page created'}\n` +
           `Preview: ${previewUrl}\n\n` +
           `──────────────────────\n` +
-          `💬 Available commands (add as a comment):\n` +
-          `• \`approve\` — publish this draft live on staging\n` +
-          `• \`revert\` — undo this change completely\n` +
-          `• \`run\` — re-run the agent on this issue`
+          `💬 Next steps:\n` +
+          `• Review the preview link above\n` +
+          `• Drag this issue to *Deployment* column to publish live\n` +
+          `• Comment \`revert\` to undo this change`
         );
         break;
       }
@@ -197,7 +256,7 @@ async function runAgent(issueKey) {
   } catch (err) {
     console.error(`❌ Error processing ${issueKey}:`, err.message);
     await addComment(issueKey, `❌ Agent encountered an error: ${err.message}`);
-    await transitionIssue(issueKey, 'Inbox').catch(() => {});
+    await transitionIssue(issueKey, 'To Do').catch(() => {});
   }
 }
 
