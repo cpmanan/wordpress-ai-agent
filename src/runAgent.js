@@ -103,18 +103,26 @@ async function runAgent(issueKey) {
       case TASK_TYPES.CONTENT: {
         const isPage = title.toLowerCase().includes('page');
 
-        // Ask OpenAI to generate the content
+        // Search for existing content first so OpenAI knows the page ID
+        const searchResults = await searchContent(title);
+        const existingItems = searchResults
+          .slice(0, 5)
+          .map(r => `ID: ${r.id} | Type: ${r.subtype} | Title: ${r.title?.rendered || r.title}`)
+          .join('\n');
+
+        // Ask OpenAI to generate/update the content
         const aiResponse = await getOpenAI().chat.completions.create({
           model: 'gpt-4o',
           messages: [
             {
               role: 'system',
-              content: `You are a WordPress content writer for a yoga studio website called Brinda Yoga.
-              Return JSON: { "title": "post title", "content": "HTML content", "action": "create" or "update", "id": null or post ID if updating }`
+              content: `You are a WordPress content editor for a yoga studio website called Brinda Yoga.
+              You will be given a task and a list of existing pages/posts found by search.
+              Return JSON: { "title": "post title", "content": "HTML content", "action": "create" or "update", "id": null or the exact post ID from the search results if updating, "type": "post" or "page" }`
             },
             {
               role: 'user',
-              content: `Task: ${title}\nDescription: ${description}`
+              content: `Task: ${title}\nDescription: ${description}\n\nExisting content found:\n${existingItems || 'None found'}`
             }
           ],
           response_format: { type: 'json_object' }
@@ -123,18 +131,19 @@ async function runAgent(issueKey) {
         const result = JSON.parse(aiResponse.choices[0].message.content);
         let savedContent = null;
         let postId = result.id;
+        const contentIsPage = result.type === 'page' || isPage;
 
         if (result.action === 'update' && postId) {
-          // Save existing content before update
-          const existing = isPage ? await getPage(postId) : await getPost(postId);
+          // Save existing content before update (for revert)
+          const existing = contentIsPage ? await getPage(postId) : await getPost(postId);
           savedContent = { title: existing.title.raw, content: existing.content.raw };
 
-          isPage
+          contentIsPage
             ? await updatePage(postId, { title: result.title, content: result.content })
             : await updatePost(postId, { title: result.title, content: result.content });
         } else {
           // Create new
-          const created = isPage
+          const created = contentIsPage
             ? await createPage(result.title, result.content, 'draft')
             : await createPost(result.title, result.content, 'draft');
           postId = created.id;
