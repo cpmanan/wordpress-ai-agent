@@ -1,0 +1,22 @@
+{
+  "name": "wordpress-ai-agent",
+  "version": "1.0.0",
+  "description": "AI Agent for Brinda Yoga WordPress site",
+  "main": "src/webhook.js",
+  "scripts": {
+    "start": "node src/webhook.js",
+    "dev": "nodemon src/webhook.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "axios": "^1.6.0",
+    "openai": "^4.20.0",
+    "node-ssh": "^13.1.0",
+    "simple-git": "^3.20.0",
+    "form-data": "^4.0.0",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
