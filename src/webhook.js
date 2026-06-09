@@ -63,13 +63,19 @@ app.post('/webhook/jira', async (req, res) => {
   // Log every incoming webhook so we can debug
   console.log(`📨 Webhook received: ${webhookEvent} | issue: ${issue?.key || 'none'} | hasComment: ${!!comment} | hasChangelog: ${!!changelog}`);
 
-  if (!issue) return;
+  if (!issue) {
+    console.log(`⚠️  No issue in webhook payload. Keys: ${Object.keys(req.body).join(', ')}`);
+    return;
+  }
 
   const issueKey = issue.key;
   const projectKey = issue.fields?.project?.key;
+  const projectName = issue.fields?.project?.name;
 
-  // Only handle issues from our project
-  if (projectKey !== PROJECT_KEY) return;
+  console.log(`   Project key: "${projectKey}" | name: "${projectName}" | expected: "${PROJECT_KEY}"`);
+
+  // Accept both project key (BRIN) and project name (brindayoga)
+  if (projectKey !== PROJECT_KEY && projectName?.toLowerCase() !== PROJECT_KEY.toLowerCase()) return;
 
   const currentStatus = issue.fields?.status?.name?.toLowerCase();
 
