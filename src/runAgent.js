@@ -91,7 +91,11 @@ async function runAgent(issueKey) {
             `✅ Theme files updated and deployed to staging.\n\n` +
             `Files changed: ${fileChanges.map(f => f.file).join(', ')}\n` +
             `Staging URL: ${process.env.WP_STAGING_URL}\n\n` +
-            `To revert, comment: \`revert\``
+            `──────────────────────\n` +
+            `💬 Available commands (add as a comment):\n` +
+            `• \`approve\` — mark this change as approved and close the issue\n` +
+            `• \`revert\` — undo this change completely\n` +
+            `• \`run\` — re-run the agent on this issue`
           );
         } finally {
           cleanup(cloneDir);
@@ -167,7 +171,11 @@ async function runAgent(issueKey) {
           `✅ ${contentIsPage ? 'Page' : 'Post'} ${result.action === 'update' ? 'updated' : 'created'} as draft.\n\n` +
           `Title: "${result.title}"\n` +
           `Preview: ${previewUrl}\n\n` +
-          `To revert, comment: \`revert\``
+          `──────────────────────\n` +
+          `💬 Available commands (add as a comment):\n` +
+          `• \`approve\` — publish this draft live on staging\n` +
+          `• \`revert\` — undo this change completely\n` +
+          `• \`run\` — re-run the agent on this issue`
         );
         break;
       }
