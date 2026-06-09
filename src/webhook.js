@@ -145,9 +145,11 @@ app.post('/webhook/jira', async (req, res) => {
     if (isCommentEvent && commentData) {
       const comment = commentData; // normalize
 
-      // Recursively extract all text from Jira ADF (rich text) format
+      // Extract text from Jira comment body
+      // Jira sends body as: plain string (comment_created) OR ADF object (issue_updated)
       function extractText(node) {
         if (!node) return '';
+        if (typeof node === 'string') return node; // plain string
         if (node.type === 'text') return node.text || '';
         if (node.content && Array.isArray(node.content)) {
           return node.content.map(extractText).join('');
@@ -158,8 +160,7 @@ app.post('/webhook/jira', async (req, res) => {
       const commentRaw = extractText(comment.body).trim();
       const commentText = commentRaw.toLowerCase().trim();
 
-      console.log(`💬 Comment on ${issueKey}: "${commentRaw}" (raw body type: ${comment.body?.type})`);
-      console.log(`   Full comment body: ${JSON.stringify(comment.body).substring(0, 300)}`);
+      console.log(`💬 Comment on ${issueKey}: "${commentRaw}"`);
 
       // ── revert ──────────────────────────────────────────────────
       if (commentText === 'revert') {
