@@ -1,6 +1,6 @@
 require('dotenv').config();
 const express = require('express');
-const { runAgent } = require('./runAgent');
+const { runAgent, redoTask } = require('./runAgent');
 const { revertTask } = require('./revert');
 const { getIssue, addComment, getRevertMeta, transitionIssue } = require('./jira');
 const { updatePost, updatePage } = require('./wpRest');
@@ -127,24 +127,33 @@ app.post('/webhook/jira', async (req, res) => {
 
     // ── 3. Comment added ───────────────────────────────────────────
     if (webhookEvent === 'jira:issue_updated' && comment) {
-      const commentText = comment.body?.content
+      // Get raw comment text (preserve original case for redo feedback)
+      const commentRaw = comment.body?.content
         ?.map(b => b.content?.map(c => c.text).join(''))
         .join('')
-        .trim()
-        .toLowerCase();
+        .trim() || '';
 
-      console.log(`💬 Comment on ${issueKey}: "${commentText}"`);
+      const commentText = commentRaw.toLowerCase();
 
-      // revert
+      console.log(`💬 Comment on ${issueKey}: "${commentRaw}"`);
+
+      // ── revert ──────────────────────────────────────────────────
       if (commentText === 'revert') {
         console.log(`↩️  Revert requested on: ${issueKey}`);
         await revertTask(issueKey);
       }
 
-      // run — manually re-trigger agent
+      // ── run — manually re-trigger agent ─────────────────────────
       if (commentText === 'run') {
         console.log(`▶️  Manual run triggered on: ${issueKey}`);
         await runAgent(issueKey);
+      }
+
+      // ── redo: <feedback> — fix based on feedback and re-preview ──
+      if (commentText.startsWith('redo:') || commentText.startsWith('redo ')) {
+        const feedback = commentRaw.replace(/^redo[: ]+/i, '').trim();
+        console.log(`🔁 Redo requested on ${issueKey}: "${feedback}"`);
+        await redoTask(issueKey, feedback);
       }
     }
 
