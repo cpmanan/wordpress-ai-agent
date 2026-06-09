@@ -5,7 +5,12 @@ const { cloneRepo, getCurrentSha, readFile, editFile, commitAndDeploy, cleanup }
 const { createPost, updatePost, getPost, createPage, updatePage, getPage, searchContent } = require('./wpRest');
 const { revertTask } = require('./revert');
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// Initialize lazily so missing key doesn't crash the server at startup
+let openai;
+function getOpenAI() {
+  if (!openai) openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  return openai;
+}
 
 async function runAgent(issueKey) {
   console.log(`\n🤖 Processing Jira issue: ${issueKey}`);
@@ -40,7 +45,7 @@ async function runAgent(issueKey) {
           const currentFunctions = readFile(cloneDir, 'functions.php').catch(() => '');
 
           // Ask OpenAI what to change
-          const aiResponse = await openai.chat.completions.create({
+          const aiResponse = await getOpenAI().chat.completions.create({
             model: 'gpt-4o',
             messages: [
               {
@@ -99,7 +104,7 @@ async function runAgent(issueKey) {
         const isPage = title.toLowerCase().includes('page');
 
         // Ask OpenAI to generate the content
-        const aiResponse = await openai.chat.completions.create({
+        const aiResponse = await getOpenAI().chat.completions.create({
           model: 'gpt-4o',
           messages: [
             {
