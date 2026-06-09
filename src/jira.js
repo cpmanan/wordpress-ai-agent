@@ -52,25 +52,47 @@ async function getRevertMeta(issueKey) {
   }
 }
 
-// Transition issue to a new status (e.g. In Progress, Review)
+// Confirmed transition IDs from BRIN project (via API on 2026-06-09)
+const TRANSITION_IDS = {
+  'to do':       '11',
+  'in progress': '21',
+  'in review':   '31',
+  'deployment':  '2',
+  'done':        '41'
+};
+
+// Transition issue to a new status using hardcoded IDs for reliability
 async function transitionIssue(issueKey, statusName) {
-  // Get available transitions
-  const res = await axios.get(
-    `${BASE_URL}/rest/api/3/issue/${issueKey}/transitions`,
-    { auth }
-  );
-  const transition = res.data.transitions.find(
-    t => t.name.toLowerCase() === statusName.toLowerCase()
-  );
-  if (!transition) {
-    console.warn(`Transition "${statusName}" not found for ${issueKey}`);
+  const id = TRANSITION_IDS[statusName.toLowerCase()];
+
+  if (!id) {
+    // Fallback: look up dynamically
+    const res = await axios.get(
+      `${BASE_URL}/rest/api/3/issue/${issueKey}/transitions`,
+      { auth }
+    );
+    const transition = res.data.transitions.find(
+      t => t.name.toLowerCase() === statusName.toLowerCase()
+    );
+    if (!transition) {
+      console.warn(`⚠️  Transition "${statusName}" not found for ${issueKey}`);
+      return;
+    }
+    await axios.post(
+      `${BASE_URL}/rest/api/3/issue/${issueKey}/transitions`,
+      { transition: { id: transition.id } },
+      { auth }
+    );
+    console.log(`✅ Transitioned ${issueKey} → ${statusName} (dynamic)`);
     return;
   }
+
   await axios.post(
     `${BASE_URL}/rest/api/3/issue/${issueKey}/transitions`,
-    { transition: { id: transition.id } },
+    { transition: { id } },
     { auth }
   );
+  console.log(`✅ Transitioned ${issueKey} → ${statusName}`);
 }
 
 module.exports = { getIssue, addComment, setRevertMeta, getRevertMeta, transitionIssue };
