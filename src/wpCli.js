@@ -17,13 +17,33 @@ async function connect() {
   if (ssh && ssh.isConnected()) return ssh;
   ssh = new NodeSSH();
   const keyPath = setupSshKey();
-  await ssh.connect({
-    host: process.env.WPENGINE_SSH_HOST,
-    username: process.env.WPENGINE_SSH_USER,
-    privateKeyPath: keyPath,
-    readyTimeout: 30000
-  });
-  console.log(`🔌 SSH connected to ${process.env.WPENGINE_SSH_HOST}`);
+
+  console.log(`🔌 Connecting SSH to ${process.env.WPENGINE_SSH_HOST} as ${process.env.WPENGINE_SSH_USER}`);
+
+  try {
+    await ssh.connect({
+      host: process.env.WPENGINE_SSH_HOST,
+      username: process.env.WPENGINE_SSH_USER,
+      privateKeyPath: keyPath,
+      port: 22,
+      readyTimeout: 20000,
+      algorithms: { serverHostKey: ['ssh-ed25519', 'ecdsa-sha2-nistp256', 'ssh-rsa'] }
+    });
+  } catch (err) {
+    ssh = null;
+    if (err.message.includes('handshake') || err.message.includes('Timed out')) {
+      throw new Error(
+        `SSH connection to WP Engine failed. Please ensure:\n` +
+        `1. SSH public key is added to WP Engine → SSH Keys (account level, not install level)\n` +
+        `2. URL: https://my.wpengine.com/ssh_keys\n` +
+        `SSH Host: ${process.env.WPENGINE_SSH_HOST}\n` +
+        `Original error: ${err.message}`
+      );
+    }
+    throw err;
+  }
+
+  console.log(`✅ SSH connected to ${process.env.WPENGINE_SSH_HOST}`);
   return ssh;
 }
 
