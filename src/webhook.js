@@ -60,6 +60,9 @@ app.post('/webhook/jira', async (req, res) => {
 
   const { webhookEvent, issue, comment, changelog } = req.body;
 
+  // Log every incoming webhook so we can debug
+  console.log(`📨 Webhook received: ${webhookEvent} | issue: ${issue?.key || 'none'} | hasComment: ${!!comment} | hasChangelog: ${!!changelog}`);
+
   if (!issue) return;
 
   const issueKey = issue.key;
@@ -126,7 +129,15 @@ app.post('/webhook/jira', async (req, res) => {
     }
 
     // ── 3. Comment added ───────────────────────────────────────────
-    if (webhookEvent === 'jira:issue_updated' && comment) {
+    // Jira sends comments as 'jira:issue_updated' with comment field
+    // OR as separate 'comment_created' event — handle both
+    const isCommentEvent = (webhookEvent === 'jira:issue_updated' && comment)
+      || webhookEvent === 'comment_created';
+
+    const commentData = comment || req.body.comment;
+
+    if (isCommentEvent && commentData) {
+      const comment = commentData; // normalize
 
       // Recursively extract all text from Jira ADF (rich text) format
       function extractText(node) {
