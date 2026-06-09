@@ -39,31 +39,64 @@ async function createPost(title, content, status = 'draft') {
 
 // Update an existing post
 async function updatePost(id, fields) {
-  const res = await axios.post(
-    `${BASE_URL}/wp-json/wp/v2/posts/${id}`,
-    fields,
-    { auth }
-  );
-  return res.data;
+  try {
+    const res = await axios.post(
+      `${BASE_URL}/wp-json/wp/v2/posts/${id}`,
+      fields,
+      { auth }
+    );
+    return res.data;
+  } catch (err) {
+    const detail = err.response?.data?.message || err.response?.data?.code || err.message;
+    throw new Error(`WP updatePost failed (${err.response?.status}): ${detail}`);
+  }
 }
 
 // Create a new page
 async function createPage(title, content, status = 'draft') {
-  const res = await axios.post(
-    `${BASE_URL}/wp-json/wp/v2/pages`,
-    { title, content, status },
-    { auth }
-  );
-  return res.data;
+  try {
+    const res = await axios.post(
+      `${BASE_URL}/wp-json/wp/v2/pages`,
+      { title, content, status },
+      { auth }
+    );
+    return res.data;
+  } catch (err) {
+    const detail = err.response?.data?.message || err.response?.data?.code || err.message;
+    throw new Error(`WP createPage failed (${err.response?.status}): ${detail}`);
+  }
 }
 
 // Update an existing page
 async function updatePage(id, fields) {
-  const res = await axios.post(
-    `${BASE_URL}/wp-json/wp/v2/pages/${id}`,
-    fields,
-    { auth }
-  );
+  try {
+    const res = await axios.post(
+      `${BASE_URL}/wp-json/wp/v2/pages/${id}`,
+      fields,
+      { auth }
+    );
+    return res.data;
+  } catch (err) {
+    const detail = err.response?.data?.message || err.response?.data?.code || err.message;
+    throw new Error(`WP updatePage failed (${err.response?.status}): ${detail}`);
+  }
+}
+
+// Find a page by slug (e.g. "contact", "about", "services")
+async function getPageBySlug(slug) {
+  const res = await axios.get(`${BASE_URL}/wp-json/wp/v2/pages`, {
+    auth,
+    params: { slug, _fields: 'id,title,content,slug,status', per_page: 1 }
+  });
+  return res.data[0] || null;
+}
+
+// Find a page by partial title match
+async function findPageByTitle(titleKeyword) {
+  const res = await axios.get(`${BASE_URL}/wp-json/wp/v2/pages`, {
+    auth,
+    params: { search: titleKeyword, per_page: 5, _fields: 'id,title,content,slug,status' }
+  });
   return res.data;
 }
 
@@ -76,4 +109,4 @@ async function listPosts(perPage = 100) {
   return res.data;
 }
 
-module.exports = { getPost, getPage, searchContent, createPost, updatePost, createPage, updatePage, listPosts };
+module.exports = { getPost, getPage, getPageBySlug, findPageByTitle, searchContent, createPost, updatePost, createPage, updatePage, listPosts };

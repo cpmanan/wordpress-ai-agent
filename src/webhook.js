@@ -83,13 +83,18 @@ app.post('/webhook/jira', async (req, res) => {
       const statusChange = changelog.items?.find(i => i.field === 'status');
 
       if (statusChange) {
-        const newStatus = statusChange.toString?.toLowerCase() || statusChange.to?.toLowerCase();
-        const newStatusName = statusChange.toString?.toLowerCase() || currentStatus;
+        // Ignore transitions made BY the agent (In Progress, In Review, Done)
+        // Only act on transitions made BY YOU (To Do re-queue, Deployment approval)
+        const agentTransitions = ['in progress', 'in review', 'done'];
+        if (agentTransitions.includes(currentStatus?.toLowerCase())) {
+          console.log(`⏭️  Ignoring agent-triggered transition to: ${currentStatus}`);
+          return;
+        }
 
         console.log(`🔄 ${issueKey} status changed to: ${currentStatus}`);
 
         // ── Moved to Deployment → publish live ──────────────────
-        if (currentStatus === STATUS.DEPLOYMENT) {
+        if (currentStatus?.toLowerCase() === STATUS.DEPLOYMENT.toLowerCase()) {
           console.log(`🚀 Deployment triggered for: ${issueKey}`);
           const meta = await getRevertMeta(issueKey);
 
@@ -112,9 +117,9 @@ app.post('/webhook/jira', async (req, res) => {
           }
         }
 
-        // ── Moved back to Inbox → re-run agent ──────────────────
-        if (currentStatus === STATUS.INBOX) {
-          console.log(`🔁 Issue moved back to Inbox: ${issueKey}`);
+        // ── Moved back to To Do → re-run agent ──────────────────
+        if (currentStatus?.toLowerCase() === STATUS.INBOX.toLowerCase()) {
+          console.log(`🔁 Issue moved back to To Do: ${issueKey}`);
           await runAgent(issueKey);
         }
       }
