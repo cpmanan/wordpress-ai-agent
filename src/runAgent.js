@@ -159,10 +159,14 @@ async function runAgent(issueKey) {
         });
 
         await transitionIssue(issueKey, 'Review');
+        const previewUrl = contentIsPage
+          ? `${process.env.WP_STAGING_URL}/?page_id=${postId}&preview=true`
+          : `${process.env.WP_STAGING_URL}/?p=${postId}&preview=true`;
+
         await addComment(issueKey,
-          `✅ ${isPage ? 'Page' : 'Post'} ${result.action === 'update' ? 'updated' : 'created'} as draft.\n\n` +
+          `✅ ${contentIsPage ? 'Page' : 'Post'} ${result.action === 'update' ? 'updated' : 'created'} as draft.\n\n` +
           `Title: "${result.title}"\n` +
-          `Preview: ${process.env.WP_STAGING_URL}/?p=${postId}\n\n` +
+          `Preview: ${previewUrl}\n\n` +
           `To revert, comment: \`revert\``
         );
         break;
