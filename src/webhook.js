@@ -127,15 +127,22 @@ app.post('/webhook/jira', async (req, res) => {
 
     // ── 3. Comment added ───────────────────────────────────────────
     if (webhookEvent === 'jira:issue_updated' && comment) {
-      // Get raw comment text (preserve original case for redo feedback)
-      const commentRaw = comment.body?.content
-        ?.map(b => b.content?.map(c => c.text).join(''))
-        .join('')
-        .trim() || '';
 
-      const commentText = commentRaw.toLowerCase();
+      // Recursively extract all text from Jira ADF (rich text) format
+      function extractText(node) {
+        if (!node) return '';
+        if (node.type === 'text') return node.text || '';
+        if (node.content && Array.isArray(node.content)) {
+          return node.content.map(extractText).join('');
+        }
+        return '';
+      }
 
-      console.log(`💬 Comment on ${issueKey}: "${commentRaw}"`);
+      const commentRaw = extractText(comment.body).trim();
+      const commentText = commentRaw.toLowerCase().trim();
+
+      console.log(`💬 Comment on ${issueKey}: "${commentRaw}" (raw body type: ${comment.body?.type})`);
+      console.log(`   Full comment body: ${JSON.stringify(comment.body).substring(0, 300)}`);
 
       // ── revert ──────────────────────────────────────────────────
       if (commentText === 'revert') {
