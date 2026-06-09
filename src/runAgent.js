@@ -4,6 +4,7 @@ const { getIssue, addComment, setRevertMeta, transitionIssue, getRevertMeta } = 
 const { cloneRepo, getCurrentSha, readFile, editFile, commitAndDeploy, cleanup } = require('./wpEngineDeploy');
 const { createPost, updatePost, getPost, createPage, updatePage, getPage, searchContent, getPageBySlug, findPageByTitle } = require('./wpRest');
 const { revertTask } = require('./revert');
+const { getMenus, addPageToMenu, addUrlToMenu, getPlugins, installPlugin, deactivatePlugin, updateYoastSeo, exportDb } = require('./wpCli');
 
 // Initialize lazily so missing key doesn't crash the server at startup
 let openai;
@@ -277,18 +278,247 @@ Return JSON: { "title": "page title", "content": "full HTML content" }`
         break;
       }
 
+      // ── NAV: Create page + add to navigation menu ───────────────────
+      case TASK_TYPES.NAV: {
+        // Ask OpenAI what page to create and which menu to add it to
+        const menus = await getMenus();
+        const menuList = menus.map(m => `ID: ${m.term_id} | Name: ${m.name}`).join('\n');
+
+        const aiResponse = await getOpenAI().chat.completions.create({
+          model: 'gpt-4o',
+          messages: [
+            {
+              role: 'system',
+              content: `You are a WordPress site manager for Brinda Yoga website.
+Given a task, decide:
+1. Whether to create a new page or use an existing page
+2. Which navigation menu to add it to
+3. What the page content should be
+
+Available menus:\n${menuList}
+
+Return JSON: {
+  "action": "create_and_add" or "add_existing",
+  "pageTitle": "page title",
+  "pageContent": "HTML content for the page (if creating new)",
+  "menuName": "exact menu name from the list above",
+  "menuItemTitle": "title to show in the menu",
+  "menuPosition": null or number
+}`
+            },
+            {
+              role: 'user',
+              content: `Task: ${title}\nDescription: ${description}`
+            }
+          ],
+          response_format: { type: 'json_object' }
+        });
+
+        const navPlan = JSON.parse(aiResponse.choices[0].message.content);
+        console.log(`📋 Nav plan: ${JSON.stringify(navPlan)}`);
+
+        let pageId = null;
+
+        // Create new page if needed
+        if (navPlan.action === 'create_and_add') {
+          const newPage = await createPage(navPlan.pageTitle, navPlan.pageContent, 'publish');
+          pageId = newPage.id;
+          console.log(`✅ Created page: "${navPlan.pageTitle}" (ID: ${pageId})`);
+        } else {
+          // Find existing page
+          const found = await getPageBySlug(navPlan.pageTitle.toLowerCase().replace(/\s+/g, '-'));
+          if (found) pageId = found.id;
+        }
+
+        // Add to navigation menu
+        if (pageId && navPlan.menuName) {
+          await addPageToMenu(navPlan.menuName, pageId, navPlan.menuItemTitle, navPlan.menuPosition);
+          console.log(`✅ Added to menu: "${navPlan.menuName}"`);
+        }
+
+        // Store revert metadata
+        await setRevertMeta(issueKey, {
+          type: 'nav',
+          pageId,
+          menuName: navPlan.menuName,
+          timestamp: new Date().toISOString()
+        });
+
+        await transitionIssue(issueKey, 'In Review');
+
+        const previewUrl = pageId
+          ? `${process.env.WP_STAGING_URL}/?page_id=${pageId}&preview=true`
+          : process.env.WP_STAGING_URL;
+
+        await addComment(issueKey,
+          `✅ Page created and added to navigation.\n\n` +
+          `Page: "${navPlan.pageTitle}"\n` +
+          `Menu: "${navPlan.menuName}" → "${navPlan.menuItemTitle}"\n` +
+          `Preview: ${previewUrl}\n\n` +
+          `──────────────────────\n` +
+          `💬 Available commands:\n` +
+          `• Drag to *Deployment* to publish live\n` +
+          `• \`redo: <feedback>\` — make changes\n` +
+          `• \`revert\` — undo everything`
+        );
+        break;
+      }
+
+      // ── SEO: Update Yoast SEO metadata ──────────────────────────────
+      case TASK_TYPES.SEO: {
+        // Find the page/post mentioned in the task
+        const slugHints = title.toLowerCase().match(/\b(contact|about|services|home|pricing|blog|faq|gallery|team|booking|schedule|classes|yoga|meditation)\b/g) || [];
+        let targetPage = null;
+
+        for (const slug of slugHints) {
+          targetPage = await getPageBySlug(slug);
+          if (targetPage) break;
+        }
+
+        if (!targetPage) {
+          const results = await findPageByTitle(slugHints[0] || title);
+          if (results.length > 0) targetPage = results[0];
+        }
+
+        if (!targetPage) {
+          await addComment(issueKey, `⚠️ Could not find the page to update SEO for. Please specify the exact page name.`);
+          await transitionIssue(issueKey, 'In Review');
+          break;
+        }
+
+        // Export DB before SEO changes (for revert)
+        const backupFile = await exportDb(issueKey);
+
+        // Ask OpenAI to generate SEO metadata
+        const seoResponse = await getOpenAI().chat.completions.create({
+          model: 'gpt-4o',
+          messages: [
+            {
+              role: 'system',
+              content: `You are an SEO expert for Brinda Yoga, a yoga studio website.
+Generate optimized Yoast SEO metadata.
+Return JSON: {
+  "seoTitle": "SEO title (max 60 chars)",
+  "metaDescription": "Meta description (max 155 chars)",
+  "focusKeyword": "primary focus keyword"
+}`
+            },
+            {
+              role: 'user',
+              content: `Task: ${title}\nPage: "${targetPage.title?.rendered}"\nPage content: ${(targetPage.content?.rendered || '').substring(0, 500)}`
+            }
+          ],
+          response_format: { type: 'json_object' }
+        });
+
+        const seoData = JSON.parse(seoResponse.choices[0].message.content);
+
+        await updateYoastSeo(targetPage.id, {
+          title: seoData.seoTitle,
+          description: seoData.metaDescription,
+          focusKeyword: seoData.focusKeyword
+        });
+
+        await setRevertMeta(issueKey, {
+          type: 'db',
+          backupFile,
+          timestamp: new Date().toISOString()
+        });
+
+        await transitionIssue(issueKey, 'In Review');
+        await addComment(issueKey,
+          `✅ SEO metadata updated for "${targetPage.title?.rendered}".\n\n` +
+          `SEO Title: ${seoData.seoTitle}\n` +
+          `Meta Description: ${seoData.metaDescription}\n` +
+          `Focus Keyword: ${seoData.focusKeyword}\n\n` +
+          `──────────────────────\n` +
+          `💬 Available commands:\n` +
+          `• \`redo: <feedback>\` — adjust the SEO copy\n` +
+          `• \`revert\` — restore previous SEO settings`
+        );
+        break;
+      }
+
+      // ── PLUGIN: Install / activate / deactivate ──────────────────────
+      case TASK_TYPES.PLUGIN: {
+        const pluginResponse = await getOpenAI().chat.completions.create({
+          model: 'gpt-4o',
+          messages: [
+            {
+              role: 'system',
+              content: `You are a WordPress admin. Parse the plugin task and return JSON: {
+  "action": "install" or "activate" or "deactivate" or "list",
+  "pluginSlug": "wordpress-plugin-slug-from-wordpress.org",
+  "pluginName": "Human readable plugin name"
+}`
+            },
+            { role: 'user', content: `Task: ${title}\nDescription: ${description}` }
+          ],
+          response_format: { type: 'json_object' }
+        });
+
+        const pluginPlan = JSON.parse(pluginResponse.choices[0].message.content);
+        console.log(`🔌 Plugin plan: ${JSON.stringify(pluginPlan)}`);
+
+        if (pluginPlan.action === 'list') {
+          const plugins = await getPlugins();
+          const pluginList = plugins.map(p => `• ${p.name} (${p.status})`).join('\n');
+          await addComment(issueKey, `📋 Installed plugins:\n\n${pluginList}`);
+          await transitionIssue(issueKey, 'Done');
+          break;
+        }
+
+        if (pluginPlan.action === 'install') {
+          await installPlugin(pluginPlan.pluginSlug);
+          await setRevertMeta(issueKey, {
+            type: 'plugin',
+            action: 'install',
+            pluginSlug: pluginPlan.pluginSlug,
+            timestamp: new Date().toISOString()
+          });
+          await transitionIssue(issueKey, 'Done');
+          await addComment(issueKey,
+            `✅ Plugin installed and activated: "${pluginPlan.pluginName}"\n\n` +
+            `• \`revert\` — deactivate and remove this plugin`
+          );
+        }
+
+        if (pluginPlan.action === 'deactivate') {
+          await deactivatePlugin(pluginPlan.pluginSlug);
+          await transitionIssue(issueKey, 'Done');
+          await addComment(issueKey, `✅ Plugin deactivated: "${pluginPlan.pluginName}"`);
+        }
+        break;
+      }
+
       // ── REVERT ──────────────────────────────────────────────────────
       case TASK_TYPES.REVERT: {
         await revertTask(issueKey);
         break;
       }
 
-      // ── UNSUPPORTED (Phase 2/3/4 tasks) ─────────────────────────────
+      // ── ELEMENTOR: Not yet supported ─────────────────────────────────
+      case TASK_TYPES.ELEMENTOR: {
+        await addComment(issueKey,
+          `⚠️ Elementor page builder editing is coming in Phase 3.\n\n` +
+          `For now, please edit this manually in WP Admin → Elementor editor.\n` +
+          `Or rephrase the task as a plain content/CSS change.`
+        );
+        await transitionIssue(issueKey, 'In Review');
+        break;
+      }
+
       default: {
         await addComment(issueKey,
-          `⚠️ Task type "${taskType}" is not yet implemented in Phase 1.\n` +
-          `Coming in a future phase: SEO, Nav, Elementor, Plugin management.`
+          `⚠️ Could not determine task type for: "${title}"\n\n` +
+          `Please rephrase the task more specifically. Examples:\n` +
+          `• "Change hero background color to navy" (theme/CSS)\n` +
+          `• "Create a new Services page and add to navigation" (nav)\n` +
+          `• "Install WooCommerce plugin" (plugin)\n` +
+          `• "Update SEO meta for the About page" (SEO)\n` +
+          `• "Add phone number to contact page" (content)`
         );
+        await transitionIssue(issueKey, 'In Review');
       }
     }
   } catch (err) {

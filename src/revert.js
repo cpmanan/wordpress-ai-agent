@@ -1,6 +1,7 @@
-const { getRevertMeta, addComment } = require('./jira');
+const { getRevertMeta, addComment, transitionIssue } = require('./jira');
 const { revertToSha } = require('./wpEngineDeploy');
 const { updatePost, updatePage } = require('./wpRest');
+const { importDb, deactivatePlugin, runWpCli } = require('./wpCli');
 
 // Execute the correct revert strategy based on stored metadata
 async function revertTask(issueKey) {
@@ -38,9 +39,32 @@ async function revertTask(issueKey) {
       // DB revert (WP CLI / Yoast / Elementor) — via SSH
       case 'db': {
         const { backupFile } = meta;
-        const { runWpCli } = require('./wpCli');
-        await runWpCli(`wp db import ${backupFile}`);
-        await addComment(issueKey, `✅ Reverted database from backup ${backupFile} (state from ${timestamp})`);
+        await importDb(backupFile);
+        await addComment(issueKey, `✅ Reverted database from backup (state from ${timestamp})`);
+        break;
+      }
+
+      // Plugin revert — deactivate and uninstall
+      case 'plugin': {
+        const { pluginSlug } = meta;
+        await deactivatePlugin(pluginSlug);
+        await runWpCli(`plugin uninstall ${pluginSlug}`);
+        await addComment(issueKey, `✅ Plugin "${pluginSlug}" deactivated and removed (state from ${timestamp})`);
+        await transitionIssue(issueKey, 'Done').catch(() => {});
+        break;
+      }
+
+      // Nav revert — remove menu item (page stays)
+      case 'nav': {
+        const { pageId, menuName } = meta;
+        const { getMenuItems } = require('./wpCli');
+        const items = await getMenuItems(menuName);
+        const item = items.find(i => i.object_id == pageId);
+        if (item) {
+          await runWpCli(`menu item delete ${item.db_id}`);
+        }
+        await addComment(issueKey, `✅ Removed page from navigation menu "${menuName}" (state from ${timestamp})`);
+        await transitionIssue(issueKey, 'Done').catch(() => {});
         break;
       }
 
