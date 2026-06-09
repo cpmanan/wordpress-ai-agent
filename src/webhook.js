@@ -2,7 +2,8 @@ require('dotenv').config();
 const express = require('express');
 const { runAgent } = require('./runAgent');
 const { revertTask } = require('./revert');
-const { getIssue, addComment } = require('./jira');
+const { getIssue, addComment, getRevertMeta, transitionIssue } = require('./jira');
+const { updatePost, updatePage } = require('./wpRest');
 
 const app = express();
 app.use(express.json());
@@ -58,6 +59,34 @@ app.post('/webhook/jira', async (req, res) => {
           await revertTask(issueKey);
         } else {
           console.log(`⚠️  Revert on ${issueKey} ignored — not assigned to agent`);
+        }
+      }
+
+      // ── Comment "approve" → publish the draft live ──────────────
+      if (commentText === 'approve') {
+        console.log(`✅ Approve requested on: ${issueKey}`);
+        const meta = await getRevertMeta(issueKey);
+
+        if (!meta) {
+          await addComment(issueKey, '⚠️ No draft found to approve. Nothing to publish.');
+        } else if (meta.type === 'content') {
+          const { postId, postType } = meta;
+          if (postType === 'page') {
+            await updatePage(postId, { status: 'publish' });
+          } else {
+            await updatePost(postId, { status: 'publish' });
+          }
+          const liveUrl = `${process.env.WP_STAGING_URL}/?page_id=${postId}`;
+          await transitionIssue(issueKey, 'Done').catch(() => {});
+          await addComment(issueKey,
+            `🚀 ${postType === 'page' ? 'Page' : 'Post'} published live on staging!\n\n` +
+            `Live URL: ${liveUrl}\n\n` +
+            `To revert, comment: \`revert\``
+          );
+        } else {
+          // For file/CSS changes — already live on staging after git push
+          await transitionIssue(issueKey, 'Done').catch(() => {});
+          await addComment(issueKey, '🚀 Change is already live on staging. Issue marked as Done.');
         }
       }
 
