@@ -614,8 +614,12 @@ Return JSON: {
     }
   } catch (err) {
     console.error(`❌ Error processing ${issueKey}:`, err.message);
-    await addComment(issueKey, `❌ Agent encountered an error: ${err.message}`);
-    await transitionIssue(issueKey, 'To Do');
+    // Move to In Review (not To Do) so it's visible and doesn't auto-retrigger
+    await addComment(issueKey,
+      `❌ Agent encountered an error:\n\n${err.message}\n\n` +
+      `💬 Comment \`run\` to retry, or \`redo: <description>\` to try differently.`
+    );
+    await transitionIssue(issueKey, 'In Review').catch(() => {});
   }
 }
 

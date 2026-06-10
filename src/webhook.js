@@ -126,11 +126,9 @@ app.post('/webhook/jira', async (req, res) => {
           }
         }
 
-        // ── Moved back to To Do → re-run agent ──────────────────
-        if (currentStatus?.toLowerCase() === STATUS.INBOX.toLowerCase()) {
-          console.log(`🔁 Issue moved back to To Do: ${issueKey}`);
-          await runAgent(issueKey);
-        }
+        // NOTE: We do NOT auto-rerun when moved to "To Do".
+        // Rerun is only triggered by: issue_created, comment "run", or comment "redo:"
+        // Auto-rerun caused infinite loops when error handler moved issue back to To Do.
       }
     }
 
