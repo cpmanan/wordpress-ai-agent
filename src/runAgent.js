@@ -565,32 +565,63 @@ Return JSON: {
           }
         }
 
-        // 2. Slug search for non-homepage pages
+        // Extract the target page name from the task title once — used in steps 2, 3, 4
+        const cleanTitle = title
+          .replace(/phase \d+\s*test \d+\s*:?\s*/i, '')
+          .replace(/update\s+(seo\s+)?(meta\s*(description\s*)?)?(and\s+seo\s+title\s*)?(for\s+(the\s+)?)?/i, '')
+          .replace(/\bseo\s+(title|meta|description|metadata)\s*(for\s+(the\s+)?)?/i, '')
+          .replace(/\s+page\s*$/i, '')
+          .trim();
+        console.log(`🔍 Target page name extracted: "${cleanTitle}"`);
+
+        // Get the front page ID once so we can exclude it from non-homepage searches
+        let frontPageId = null;
+        try {
+          const settingsRes = await axios.get(`${WP_BASE}/wp-json/wp/v2/settings`, { auth: wpAuth });
+          frontPageId = settingsRes.data?.page_on_front || null;
+        } catch (e) { /* ignore */ }
+
+        // 2. Slug search — try common slug variants of the extracted page name
         if (!targetPage) {
-          const slugHints = (title + ' ' + description).toLowerCase()
-            .match(/\b(contact|about|services|pricing|blog|faq|gallery|team|booking|schedule|classes|yoga|meditation|about-us)\b/g) || [];
-          for (const slug of slugHints) {
-            targetPage = await getPageBySlug(slug);
-            if (targetPage) { console.log(`✅ Found page by slug "${slug}"`); break; }
+          const slugVariants = [
+            cleanTitle.toLowerCase().replace(/\s+/g, '-'),  // "about us" → "about-us"
+            cleanTitle.toLowerCase().replace(/\s+/g, ''),   // "about us" → "aboutus"
+            cleanTitle.toLowerCase().split(/\s+/)[0],       // first word: "about"
+          ];
+          // Also pull known slugs from the title text
+          const knownSlugs = (title + ' ' + description).toLowerCase()
+            .match(/\b(contact|about|services|pricing|blog|faq|gallery|team|booking|schedule|classes|yoga|meditation|about-us|our-story|who-we-are)\b/g) || [];
+          const allSlugs = [...new Set([...slugVariants, ...knownSlugs])];
+
+          for (const slug of allSlugs) {
+            const found = await getPageBySlug(slug);
+            if (found && found.id !== frontPageId) {
+              targetPage = found;
+              console.log(`✅ Found page by slug "${slug}": "${targetPage.title?.rendered}"`);
+              break;
+            }
           }
         }
 
-        // 3. Title keyword search — strip common prefixes from task title
+        // 3. Title search with the extracted page name
         if (!targetPage) {
-          const cleanTitle = title
-            .replace(/phase \d+\s*test \d+\s*:?\s*/i, '')
-            .replace(/update\s+(seo\s+)?(meta\s*(description\s*)?)?(and\s+seo\s+title\s*)?(for\s+(the\s+)?)?/i, '')
-            .replace(/\s+page\s*$/i, '')  // strip trailing " page"
-            .trim();
-          console.log(`🔍 Searching for page by title: "${cleanTitle}"`);
+          console.log(`🔍 Searching pages by title: "${cleanTitle}"`);
           const results = await findPageByTitle(cleanTitle);
-          if (results.length > 0) { targetPage = results[0]; console.log(`✅ Found page by title search: "${targetPage.title?.rendered}"`); }
+          // Exclude the front page unless we're explicitly looking for the homepage
+          const filtered = results.filter(p => p.id !== frontPageId);
+          if (filtered.length > 0) {
+            targetPage = filtered[0];
+            console.log(`✅ Found page by title search: "${targetPage.title?.rendered}"`);
+          } else if (results.length > 0 && results[0].id !== frontPageId) {
+            targetPage = results[0];
+            console.log(`✅ Found page by title search: "${targetPage.title?.rendered}"`);
+          }
         }
 
-        // 4. Search content API
+        // 4. Content search — use cleanTitle, exclude homepage
         if (!targetPage) {
-          const searchResults = await searchContent(title);
-          const pageResult = searchResults.find(r => r.subtype === 'page');
+          const searchResults = await searchContent(cleanTitle);
+          const pageResult = searchResults.find(r => r.subtype === 'page' && r.id !== frontPageId);
           if (pageResult) {
             targetPage = await getPage(pageResult.id);
             console.log(`✅ Found page via content search: "${targetPage.title?.rendered}"`);
@@ -599,10 +630,11 @@ Return JSON: {
 
         if (!targetPage) {
           await addComment(issueKey,
-            `⚠️ Could not find the page to update SEO for.\n\n` +
-            `Please include the exact page name in the task, e.g:\n` +
-            `• "Update SEO for the *About Us* page"\n` +
-            `• "Update SEO for the *homepage*"\n` +
+            `⚠️ Could not find a page matching *"${cleanTitle}"*.\n\n` +
+            `Tried slugs, title search, and content search — no match found (homepage excluded).\n\n` +
+            `Please check the exact page title in WP Admin → Pages and update the task title to match. Examples:\n` +
+            `• "Update SEO for the *About* page" (if slug is /about/)\n` +
+            `• "Update SEO for the *Our Story* page"\n` +
             `• "Update SEO for the *Contact* page"`
           );
           await transitionIssue(issueKey, 'In Review');
