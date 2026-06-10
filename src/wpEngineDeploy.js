@@ -190,7 +190,9 @@ async function pollPipelineUntilDone(commitSha, timeoutMs = 600000) {
     console.warn('    Pipeline polling disabled — sleeping 90s then treating as SUCCESSFUL.');
     console.warn('    To enable: create a Bitbucket App Password with pipelines:read scope');
     console.warn('    and set BITBUCKET_USERNAME + BITBUCKET_APP_PASSWORD in Railway env vars.');
-    await new Promise(r => setTimeout(r, 90000));
+    // Pipeline typically takes ~40s. Sleep 120s to be safe.
+    console.log('⏳ Sleeping 120s to allow pipeline to complete...');
+    await new Promise(r => setTimeout(r, 120000));
     return 'UNKNOWN';
   }
 
@@ -222,7 +224,7 @@ async function pollPipelineUntilDone(commitSha, timeoutMs = 600000) {
         // 403 = wrong credentials or missing scope — no point retrying
         console.warn('⚠️  Bitbucket Pipelines API returned 403 Forbidden.');
         console.warn('    Check that BITBUCKET_APP_PASSWORD has pipelines:read scope.');
-        console.warn('    Falling back to 90s fixed wait.');
+        console.warn('    Falling back to 120s fixed wait.');
         attempt403 = true;
         break;
       }
@@ -232,7 +234,7 @@ async function pollPipelineUntilDone(commitSha, timeoutMs = 600000) {
   }
 
   if (attempt403 || !pipelineUuid) {
-    await new Promise(r => setTimeout(r, attempt403 ? 90000 : 60000));
+    await new Promise(r => setTimeout(r, 120000));
     return 'UNKNOWN';
   }
 

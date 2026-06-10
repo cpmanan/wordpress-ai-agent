@@ -43,7 +43,7 @@ async function takeScreenshot(url) {
     fullPage: true,
     'viewport.width': 1440,
     'viewport.height': 900,
-    waitFor: 3000,
+    waitFor: 6000, // wait 6s for fonts, images, and CSS animations to fully load
     force: true,   // ← critical: don't serve cached screenshot from previous runs
   };
 
