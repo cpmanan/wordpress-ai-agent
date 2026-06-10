@@ -55,8 +55,29 @@ async function runAgent(issueKey, feedbackContext = null) {
               {
                 role: 'system',
                 content: `You are a WordPress child theme developer for Brinda Yoga website.
+The site uses the VIHARA theme (v1.3.5) by ThemeREX. You MUST use Vihara-specific CSS selectors.
 You will receive a task and the current child theme files.
 Make ONLY the specific change requested — do not rewrite unrelated styles.
+
+VIHARA THEME CSS SELECTORS (use these — generic selectors like .btn or .button will NOT work):
+- Buttons: .sc_button, .sc_button_default, .sc_button_size_small, .sc_button_size_normal, .sc_button_size_large
+- Button hover: .sc_button:hover, .sc_button_default:hover
+- Section titles (h1 headings): .sc_title_title, .sc_item_title
+- Section subtitles: .sc_item_subtitle, .sc_title_subtitle
+- Main header wrapper: .top_panel
+- Sticky nav bar: .sc_layouts_row_fixed, .sc_layouts_row_fixed_always
+- Nav menu links: .sc_layouts_menu_nav > li > a
+- Body content area: .page_content_wrap
+- Service card buttons: .sc_services_item_button .sc_button
+- Price item buttons: .sc_price_item_link.sc_button
+- "Read More" links: a.more-link
+
+IMPORTANT CSS RULES:
+1. Always use !important for color/background overrides to beat Vihara's specificity
+2. Target VIHARA classes specifically — do NOT use generic HTML tag selectors alone
+3. For sticky header: the header already has .sc_layouts_row_fixed class, add scroll behavior via JS in functions.php if needed
+4. For fonts: the body uses Poppins (sans-serif), headings use Lora (serif)
+5. The child theme style.css loads AFTER parent, so use specific selectors + !important
 
 RULES:
 1. Only edit files that need changing for this task
