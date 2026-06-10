@@ -123,6 +123,16 @@ app.post('/webhook/jira', async (req, res) => {
               `Staging URL: ${process.env.WP_STAGING_URL}\n\n` +
               `• \`revert\` — undo this change`
             );
+          } else if (meta.type === 'seo' || meta.type === 'nav') {
+            // SEO and NAV changes are already applied — no publish step needed
+            await transitionIssue(issueKey, STATUS.LIVE).catch(() => {});
+            await addComment(issueKey,
+              `✅ ${meta.type === 'seo' ? 'SEO metadata' : 'Navigation change'} approved and marked as Done.\n\n` +
+              `• \`revert\` — undo this change`
+            );
+          } else {
+            // Unknown type — just move to Done
+            await transitionIssue(issueKey, STATUS.LIVE).catch(() => {});
           }
         }
 

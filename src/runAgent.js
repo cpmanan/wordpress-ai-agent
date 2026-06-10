@@ -491,7 +491,7 @@ Return JSON: {
           timestamp: new Date().toISOString()
         });
 
-        await transitionIssue(issueKey, 'Done');
+        await transitionIssue(issueKey, 'In Review');
 
         const previewUrl = pageId
           ? `${process.env.WP_STAGING_URL}/?page_id=${pageId}&preview=true`
@@ -749,7 +749,7 @@ add_action('rest_api_init', function() {
           timestamp: new Date().toISOString()
         });
 
-        await transitionIssue(issueKey, 'Done');
+        await transitionIssue(issueKey, 'In Review');
 
         // Build preview & verification URLs
         const pageUrl      = targetPage.link || `${WP_BASE}/?page_id=${targetPage.id}`;
