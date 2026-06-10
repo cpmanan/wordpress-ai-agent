@@ -186,25 +186,21 @@ Return JSON exactly like this:
 
           await transitionIssue(issueKey, 'In Review');
 
-          // ── Screenshot: look up the actual page URL rather than guessing from slug
+          // ── Screenshot: resolve page URL from task context
           let changedPageUrl = process.env.WP_STAGING_URL; // default: homepage
-          const pageUrlMatch = (title + ' ' + description).match(/https?:\/\/[^\s|"')>\]]+/);
+          const base = (process.env.WP_STAGING_URL || '').replace(/\/$/, '');
+
+          // 1. Explicit URL in task title or description
+          const pageUrlMatch = (title + ' ' + description).match(/https?:\/\/[^\s|"')>\]\n]+/);
           if (pageUrlMatch) {
             changedPageUrl = pageUrlMatch[0].replace(/[|"')>\]]+$/, '');
           } else {
-            // Try to look up the page by slug hint and get its real WP link
+            // 2. Known slug keyword → build URL directly (no API lookup needed)
             const slugHintMatch = (title + ' ' + description).toLowerCase()
-              .match(/\b(faq|about|about-us|contact|services|classes|blog|schedule|team|gallery|pricing|booking|home)\b/);
+              .match(/\b(faq|about|about-us|contact|services|classes|blog|schedule|team|gallery|pricing|booking)\b/);
             if (slugHintMatch) {
-              try {
-                const { getPageBySlug, findPageByTitle } = require('./wpRest');
-                const hintPage = await getPageBySlug(slugHintMatch[0])
-                  || (await findPageByTitle(slugHintMatch[0]))?.[0];
-                if (hintPage?.link) {
-                  changedPageUrl = hintPage.link;
-                  console.log(`📸 Resolved page URL from slug "${slugHintMatch[0]}": ${changedPageUrl}`);
-                }
-              } catch (e) { console.warn('⚠️  Could not resolve page URL for screenshot:', e.message); }
+              changedPageUrl = `${base}/${slugHintMatch[0]}/`;
+              console.log(`📸 Using slug-based URL: ${changedPageUrl}`);
             }
           }
           console.log(`📸 Taking screenshot of ${changedPageUrl}...`);
