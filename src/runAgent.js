@@ -662,11 +662,22 @@ Return JSON: {
         });
 
         await transitionIssue(issueKey, 'In Review');
+
+        // Build preview & verification URLs
+        const pageUrl      = targetPage.link || `${WP_BASE}/?page_id=${targetPage.id}`;
+        const wpAdminUrl   = `${WP_BASE}/wp-admin/post.php?post=${targetPage.id}&action=edit`;
+        const viewSourceTip = `To verify: open the page → right-click → View Page Source → search for \`og:title\` or \`description\``;
+
         await addComment(issueKey,
           `✅ SEO metadata updated for *"${targetPage.title?.rendered}"*.\n\n` +
           `*SEO Title:* ${seoData.seoTitle}\n` +
           `*Meta Description:* ${seoData.metaDescription}\n` +
           `*Focus Keyword:* ${seoData.focusKeyword}\n\n` +
+          `──────────────────────\n` +
+          `🔗 *Preview & Verify:*\n` +
+          `• [View page|${pageUrl}] — check the live page\n` +
+          `• [WP Admin → Edit|${wpAdminUrl}] — scroll to Yoast SEO section to confirm\n` +
+          `• ${viewSourceTip}\n\n` +
           `──────────────────────\n` +
           `💬 Commands:\n` +
           `• \`redo: <feedback>\` — adjust the SEO copy\n` +
