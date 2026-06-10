@@ -516,35 +516,80 @@ Return JSON: {
 
         let targetPage = null;
 
-        // 1. Homepage detection — check if task mentions "homepage" or "home page"
+        // Helper: list all published pages (for homepage detection fallback)
+        async function getAllPages() {
+          const res = await axios.get(`${WP_BASE}/wp-json/wp/v2/pages`, {
+            auth: wpAuth,
+            params: { per_page: 100, status: 'publish', _fields: 'id,title,slug,link,content,meta' }
+          });
+          return res.data;
+        }
+
+        // 1. Homepage — try WP settings first, then slug/title fallbacks
         const isHomepage = /\b(homepage|home page|front page|home)\b/i.test(title + ' ' + description);
         if (isHomepage) {
-          // Fetch WordPress reading settings to get the static front page ID
+          // 1a. WP Reading Settings → page_on_front
           try {
             const settingsRes = await axios.get(`${WP_BASE}/wp-json/wp/v2/settings`, { auth: wpAuth });
             const frontPageId = settingsRes.data?.page_on_front;
             if (frontPageId && frontPageId !== 0) {
               targetPage = await getPage(frontPageId);
-              console.log(`✅ Found front page via settings: "${targetPage.title?.rendered}" (ID: ${frontPageId})`);
+              console.log(`✅ Homepage via settings (page_on_front=${frontPageId}): "${targetPage.title?.rendered}"`);
             }
           } catch (e) {
-            console.warn('⚠️  Could not fetch WP settings for front page ID:', e.message);
+            console.warn('⚠️  WP settings API failed:', e.message);
+          }
+
+          // 1b. Try common homepage slugs
+          if (!targetPage) {
+            for (const slug of ['home', 'homepage', 'front-page', 'welcome']) {
+              targetPage = await getPageBySlug(slug);
+              if (targetPage) { console.log(`✅ Homepage via slug "${slug}"`); break; }
+            }
+          }
+
+          // 1c. Find page whose URL is the root (site URL without path)
+          if (!targetPage) {
+            try {
+              const allPages = await getAllPages();
+              const siteUrl  = WP_BASE.replace(/\/$/, '');
+              targetPage = allPages.find(p => p.link?.replace(/\/$/, '') === siteUrl) || null;
+              if (targetPage) console.log(`✅ Homepage via root URL match: "${targetPage.title?.rendered}"`);
+            } catch (e) {
+              console.warn('⚠️  getAllPages fallback failed:', e.message);
+            }
           }
         }
 
-        // 2. Slug / title search fallback
+        // 2. Slug search for non-homepage pages
         if (!targetPage) {
-          const slugHints = title.toLowerCase().match(/\b(contact|about|services|pricing|blog|faq|gallery|team|booking|schedule|classes|yoga|meditation)\b/g) || [];
+          const slugHints = (title + ' ' + description).toLowerCase()
+            .match(/\b(contact|about|services|pricing|blog|faq|gallery|team|booking|schedule|classes|yoga|meditation|about-us)\b/g) || [];
           for (const slug of slugHints) {
             targetPage = await getPageBySlug(slug);
-            if (targetPage) break;
+            if (targetPage) { console.log(`✅ Found page by slug "${slug}"`); break; }
           }
         }
 
+        // 3. Title keyword search — strip common prefixes from task title
         if (!targetPage) {
-          const titleWords = title.replace(/phase \d+ test \d+:?/i, '').trim();
-          const results = await findPageByTitle(titleWords);
-          if (results.length > 0) targetPage = results[0];
+          const cleanTitle = title
+            .replace(/phase \d+\s*test \d+\s*:?\s*/i, '')
+            .replace(/update\s+seo\s+(meta\s+)?(for\s+(the\s+)?)?/i, '')
+            .trim();
+          console.log(`🔍 Searching for page by title: "${cleanTitle}"`);
+          const results = await findPageByTitle(cleanTitle);
+          if (results.length > 0) { targetPage = results[0]; console.log(`✅ Found page by title search: "${targetPage.title?.rendered}"`); }
+        }
+
+        // 4. Search content API
+        if (!targetPage) {
+          const searchResults = await searchContent(title);
+          const pageResult = searchResults.find(r => r.subtype === 'page');
+          if (pageResult) {
+            targetPage = await getPage(pageResult.id);
+            console.log(`✅ Found page via content search: "${targetPage.title?.rendered}"`);
+          }
         }
 
         if (!targetPage) {
