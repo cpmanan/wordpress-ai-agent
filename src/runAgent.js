@@ -164,11 +164,12 @@ Return JSON exactly like this:
             break;
           }
 
-          // ── Pipeline succeeded ─────────────────────────────────────────
-          await addComment(issueKey,
-            `✅ Pipeline completed successfully — changes are live on staging.\n\n` +
-            `⏳ Waiting 15s for WP Engine cache to settle, then taking screenshot...`
-          );
+          // ── Pipeline succeeded (or UNKNOWN = no app password, assumed OK) ──
+          const pipelineNote = pipelineResult === 'UNKNOWN'
+            ? `✅ Deploy wait complete (pipeline polling not configured — set BITBUCKET_USERNAME + BITBUCKET_APP_PASSWORD in Railway for real-time pipeline status).`
+            : `✅ Pipeline completed successfully — changes are live on staging.`;
+
+          await addComment(issueKey, `${pipelineNote}\n\n⏳ Waiting 15s for WP Engine cache to settle, then taking screenshot...`);
 
           // Purge WP Engine page cache
           if (wpeDeployed) await purgeCache();

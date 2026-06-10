@@ -163,39 +163,50 @@ function cleanup(cloneDir) {
 
 /**
  * Poll Bitbucket Pipelines API until the latest pipeline for the repo completes.
- * Returns 'SUCCESSFUL' | 'FAILED' | 'STOPPED' | 'TIMEOUT'.
+ * Returns 'SUCCESSFUL' | 'FAILED' | 'STOPPED' | 'TIMEOUT' | 'UNKNOWN'.
  *
- * Requires env vars:
- *   BITBUCKET_WORKSPACE  — e.g. "cp-jira"
- *   BITBUCKET_REPO_SLUG  — e.g. "brindayoga"
- *   BITBUCKET_ACCESS_TOKEN — repo access token
+ * Auth: uses BITBUCKET_APP_PASSWORD (Basic auth — needs pipelines:read scope).
+ * Bitbucket repository access tokens do NOT have pipelines scope — you must use
+ * an App Password: Bitbucket → Settings → App passwords → pipelines:read.
+ *
+ * Required env vars:
+ *   BITBUCKET_USERNAME      — your Bitbucket username (e.g. "cp")
+ *   BITBUCKET_APP_PASSWORD  — App Password with pipelines:read scope
+ *   BITBUCKET_WORKSPACE     — e.g. "cp-jira"  (defaults to "cp-jira")
+ *   BITBUCKET_REPO_SLUG     — e.g. "brindayoga" (defaults to "brindayoga")
  *
  * @param {string} commitSha  — the SHA we just pushed, so we watch the right pipeline
  * @param {number} timeoutMs  — give up after this many ms (default 10 min)
  */
 async function pollPipelineUntilDone(commitSha, timeoutMs = 600000) {
-  const workspace = process.env.BITBUCKET_WORKSPACE || 'cp-jira';
-  const repoSlug  = process.env.BITBUCKET_REPO_SLUG  || 'brindayoga';
-  const token     = process.env.BITBUCKET_ACCESS_TOKEN;
+  const workspace = process.env.BITBUCKET_WORKSPACE   || 'cp-jira';
+  const repoSlug  = process.env.BITBUCKET_REPO_SLUG   || 'brindayoga';
+  const bbUser    = process.env.BITBUCKET_USERNAME;
+  const bbPass    = process.env.BITBUCKET_APP_PASSWORD;
 
-  if (!token) {
-    console.warn('⚠️  BITBUCKET_ACCESS_TOKEN not set — skipping pipeline poll, sleeping 90s instead');
+  // Require App Password (Basic auth) — repo access tokens don't have pipelines scope
+  if (!bbUser || !bbPass) {
+    console.warn('⚠️  BITBUCKET_USERNAME / BITBUCKET_APP_PASSWORD not set.');
+    console.warn('    Pipeline polling disabled — sleeping 90s then treating as SUCCESSFUL.');
+    console.warn('    To enable: create a Bitbucket App Password with pipelines:read scope');
+    console.warn('    and set BITBUCKET_USERNAME + BITBUCKET_APP_PASSWORD in Railway env vars.');
     await new Promise(r => setTimeout(r, 90000));
     return 'UNKNOWN';
   }
 
   const apiBase = `https://api.bitbucket.org/2.0/repositories/${workspace}/${repoSlug}/pipelines/`;
-  const headers = { Authorization: `Bearer ${token}` };
+  const auth    = { username: bbUser, password: bbPass };
 
   const deadline = Date.now() + timeoutMs;
   let pipelineUuid = null;
 
-  // Step 1 — find the pipeline triggered by our commit (poll up to 30s for it to appear)
+  // Step 1 — find the pipeline triggered by our commit (retry up to 60s for it to appear)
   console.log(`🔍 Looking for Bitbucket pipeline for commit ${commitSha.slice(0, 8)}...`);
+  let attempt403 = false;
   while (Date.now() < deadline) {
     try {
       const res = await axios.get(apiBase, {
-        headers,
+        auth,
         params: { sort: '-created_on', pagelen: 5 },
       });
       const pipelines = res.data?.values || [];
@@ -205,15 +216,23 @@ async function pollPipelineUntilDone(commitSha, timeoutMs = 600000) {
         console.log(`✅ Found pipeline ${pipelineUuid} — state: ${match.state?.name}`);
         break;
       }
+      console.log('  Pipeline not yet created, retrying in 10s...');
     } catch (e) {
+      if (e.response?.status === 403) {
+        // 403 = wrong credentials or missing scope — no point retrying
+        console.warn('⚠️  Bitbucket Pipelines API returned 403 Forbidden.');
+        console.warn('    Check that BITBUCKET_APP_PASSWORD has pipelines:read scope.');
+        console.warn('    Falling back to 90s fixed wait.');
+        attempt403 = true;
+        break;
+      }
       console.warn('⚠️  Pipeline list error:', e.message);
     }
-    await new Promise(r => setTimeout(r, 10000)); // check every 10s
+    await new Promise(r => setTimeout(r, 10000));
   }
 
-  if (!pipelineUuid) {
-    console.warn('⚠️  Could not find pipeline for commit — sleeping 90s as fallback');
-    await new Promise(r => setTimeout(r, 90000));
+  if (attempt403 || !pipelineUuid) {
+    await new Promise(r => setTimeout(r, attempt403 ? 90000 : 60000));
     return 'UNKNOWN';
   }
 
@@ -221,7 +240,7 @@ async function pollPipelineUntilDone(commitSha, timeoutMs = 600000) {
   console.log(`⏳ Polling pipeline ${pipelineUuid} until done...`);
   while (Date.now() < deadline) {
     try {
-      const res = await axios.get(`${apiBase}${pipelineUuid}`, { headers });
+      const res = await axios.get(`${apiBase}${pipelineUuid}`, { auth });
       const pipeline = res.data;
       const stateName   = pipeline.state?.name;        // PENDING | IN_PROGRESS | COMPLETED
       const resultName  = pipeline.state?.result?.name; // SUCCESSFUL | FAILED | STOPPED
