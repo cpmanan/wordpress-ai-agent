@@ -161,7 +161,88 @@ function cleanup(cloneDir) {
   }
 }
 
+/**
+ * Poll Bitbucket Pipelines API until the latest pipeline for the repo completes.
+ * Returns 'SUCCESSFUL' | 'FAILED' | 'STOPPED' | 'TIMEOUT'.
+ *
+ * Requires env vars:
+ *   BITBUCKET_WORKSPACE  — e.g. "cp-jira"
+ *   BITBUCKET_REPO_SLUG  — e.g. "brindayoga"
+ *   BITBUCKET_ACCESS_TOKEN — repo access token
+ *
+ * @param {string} commitSha  — the SHA we just pushed, so we watch the right pipeline
+ * @param {number} timeoutMs  — give up after this many ms (default 10 min)
+ */
+async function pollPipelineUntilDone(commitSha, timeoutMs = 600000) {
+  const workspace = process.env.BITBUCKET_WORKSPACE || 'cp-jira';
+  const repoSlug  = process.env.BITBUCKET_REPO_SLUG  || 'brindayoga';
+  const token     = process.env.BITBUCKET_ACCESS_TOKEN;
+
+  if (!token) {
+    console.warn('⚠️  BITBUCKET_ACCESS_TOKEN not set — skipping pipeline poll, sleeping 90s instead');
+    await new Promise(r => setTimeout(r, 90000));
+    return 'UNKNOWN';
+  }
+
+  const apiBase = `https://api.bitbucket.org/2.0/repositories/${workspace}/${repoSlug}/pipelines/`;
+  const headers = { Authorization: `Bearer ${token}` };
+
+  const deadline = Date.now() + timeoutMs;
+  let pipelineUuid = null;
+
+  // Step 1 — find the pipeline triggered by our commit (poll up to 30s for it to appear)
+  console.log(`🔍 Looking for Bitbucket pipeline for commit ${commitSha.slice(0, 8)}...`);
+  while (Date.now() < deadline) {
+    try {
+      const res = await axios.get(apiBase, {
+        headers,
+        params: { sort: '-created_on', pagelen: 5 },
+      });
+      const pipelines = res.data?.values || [];
+      const match = pipelines.find(p => p.target?.commit?.hash?.startsWith(commitSha.slice(0, 12)));
+      if (match) {
+        pipelineUuid = match.uuid;
+        console.log(`✅ Found pipeline ${pipelineUuid} — state: ${match.state?.name}`);
+        break;
+      }
+    } catch (e) {
+      console.warn('⚠️  Pipeline list error:', e.message);
+    }
+    await new Promise(r => setTimeout(r, 10000)); // check every 10s
+  }
+
+  if (!pipelineUuid) {
+    console.warn('⚠️  Could not find pipeline for commit — sleeping 90s as fallback');
+    await new Promise(r => setTimeout(r, 90000));
+    return 'UNKNOWN';
+  }
+
+  // Step 2 — poll until COMPLETED
+  console.log(`⏳ Polling pipeline ${pipelineUuid} until done...`);
+  while (Date.now() < deadline) {
+    try {
+      const res = await axios.get(`${apiBase}${pipelineUuid}`, { headers });
+      const pipeline = res.data;
+      const stateName   = pipeline.state?.name;        // PENDING | IN_PROGRESS | COMPLETED
+      const resultName  = pipeline.state?.result?.name; // SUCCESSFUL | FAILED | STOPPED
+
+      console.log(`  Pipeline state: ${stateName} / ${resultName || '—'}`);
+
+      if (stateName === 'COMPLETED') {
+        console.log(`✅ Pipeline finished: ${resultName}`);
+        return resultName || 'COMPLETED';
+      }
+    } catch (e) {
+      console.warn('⚠️  Pipeline poll error:', e.message);
+    }
+    await new Promise(r => setTimeout(r, 15000)); // check every 15s
+  }
+
+  console.warn('⚠️  Pipeline poll timed out');
+  return 'TIMEOUT';
+}
+
 module.exports = {
   cloneRepo, getCurrentSha, readFile, readAgentContext, editFile,
-  commitAndDeploy, purgeCache, revertToSha, cleanup
+  commitAndDeploy, purgeCache, revertToSha, cleanup, pollPipelineUntilDone
 };

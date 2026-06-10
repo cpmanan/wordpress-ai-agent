@@ -34,6 +34,7 @@ async function takeScreenshot(url) {
   //   fullPage=true          → scroll and capture entire page height
   //   viewport.width=1440    → desktop width
   //   waitFor=3000           → wait 3s for animations/lazy images to load
+  //   force=true             → bypass microlink's own CDN cache — always re-render fresh
   const apiUrl = 'https://api.microlink.io';
   const params = {
     url,
@@ -43,6 +44,7 @@ async function takeScreenshot(url) {
     'viewport.width': 1440,
     'viewport.height': 900,
     waitFor: 3000,
+    force: true,   // ← critical: don't serve cached screenshot from previous runs
   };
 
   console.log('⏳ Waiting for microlink.io to render full page...');
@@ -106,9 +108,9 @@ async function uploadToJira(issueKey, screenshotPath) {
  * Main export: screenshot staging → upload to Jira → return attachment URL.
  * Fails gracefully — screenshot is nice-to-have, not critical to the deploy flow.
  */
-async function capturePreview(issueKey) {
+async function capturePreview(issueKey, urlOverride) {
   try {
-    const screenshotPath = await takeScreenshot(WP_URL);
+    const screenshotPath = await takeScreenshot(urlOverride || WP_URL);
     const imageUrl       = await uploadToJira(issueKey, screenshotPath);
 
     // Clean up temp file

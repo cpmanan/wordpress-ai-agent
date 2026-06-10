@@ -1,7 +1,7 @@
 const OpenAI = require('openai');
 const { detectTaskType, TASK_TYPES } = require('./taskRouter');
 const { getIssue, addComment, setRevertMeta, transitionIssue, getRevertMeta } = require('./jira');
-const { cloneRepo, getCurrentSha, readFile, readAgentContext, editFile, commitAndDeploy, purgeCache, cleanup } = require('./wpEngineDeploy');
+const { cloneRepo, getCurrentSha, readFile, readAgentContext, editFile, commitAndDeploy, purgeCache, cleanup, pollPipelineUntilDone } = require('./wpEngineDeploy');
 const { getParentThemeContext } = require('./viharaContext');
 const { capturePreview } = require('./screenshotter');
 const { createPost, updatePost, getPost, createPage, updatePage, getPage, searchContent, getPageBySlug, findPageByTitle } = require('./wpRest');
@@ -128,14 +128,20 @@ Return JSON exactly like this:
             editFile(cloneDir, change.file, change.content);
           }
 
-          // Commit → push to Bitbucket → push to WP Engine
+          // Commit → push to Bitbucket (pipeline auto-deploys to WP Engine)
           const { sha: newSha, wpeDeployed } = await commitAndDeploy(
             cloneDir,
             `[AI Agent] ${title} (${issueKey})`
           );
 
-          // Purge WP Engine cache (only if deploy succeeded)
-          if (wpeDeployed) await purgeCache();
+          // ── Step comment: pipeline triggered ──────────────────────────
+          await addComment(issueKey,
+            `🚀 Code committed and pushed to Bitbucket.\n\n` +
+            `Files changed: ${fileChanges.map(f => f.file).join(', ')}\n` +
+            `Commit: \`${newSha.slice(0, 8)}\`\n\n` +
+            `⏳ Bitbucket Pipeline is now running — deploying to WP Engine staging...\n` +
+            `[View pipeline →|https://bitbucket.org/${process.env.BITBUCKET_WORKSPACE || 'cp-jira'}/${process.env.BITBUCKET_REPO_SLUG || 'brindayoga'}/pipelines]`
+          );
 
           // Store revert metadata
           await setRevertMeta(issueKey, {
@@ -146,23 +152,51 @@ Return JSON exactly like this:
             timestamp: new Date().toISOString()
           });
 
+          // ── Poll Bitbucket until pipeline finishes ─────────────────────
+          const pipelineResult = await pollPipelineUntilDone(newSha);
+
+          if (pipelineResult === 'FAILED' || pipelineResult === 'STOPPED') {
+            await addComment(issueKey,
+              `❌ Bitbucket Pipeline ${pipelineResult.toLowerCase()}.\n\n` +
+              `[Check pipeline logs →|https://bitbucket.org/${process.env.BITBUCKET_WORKSPACE || 'cp-jira'}/${process.env.BITBUCKET_REPO_SLUG || 'brindayoga'}/pipelines]`
+            );
+            await transitionIssue(issueKey, 'In Review');
+            break;
+          }
+
+          // ── Pipeline succeeded ─────────────────────────────────────────
+          await addComment(issueKey,
+            `✅ Pipeline completed successfully — changes are live on staging.\n\n` +
+            `⏳ Waiting 15s for WP Engine cache to settle, then taking screenshot...`
+          );
+
+          // Purge WP Engine page cache
+          if (wpeDeployed) await purgeCache();
+
+          // Short wait for WP Engine to settle after pipeline
+          await new Promise(r => setTimeout(r, 15000));
+
           await transitionIssue(issueKey, 'In Review');
 
-          // Wait ~60s for Bitbucket Pipeline to deploy, then take screenshot
-          console.log('⏳ Waiting 60s for pipeline to deploy before screenshot...');
-          await new Promise(r => setTimeout(r, 60000));
-          const screenshotUrl = await capturePreview(issueKey);
+          // ── Screenshot: force fresh, cache-busted URL ──────────────────
+          // Append ?nocache=<timestamp> so microlink.io fetches a brand-new page
+          // (not a cached render) on every run.
+          const stagingUrl = process.env.WP_STAGING_URL || 'https://brindayogacstg.wpenginepowered.com';
+          const freshUrl   = `${stagingUrl}?nocache=${Date.now()}`;
+
+          console.log(`📸 Taking screenshot of fresh URL: ${freshUrl}`);
+          const screenshotUrl = await capturePreview(issueKey, freshUrl);
 
           const screenshotLine = screenshotUrl
-            ? `\n📸 [Preview Screenshot|${screenshotUrl}]`
-            : '';
+            ? `\n\n📸 *Full-page preview screenshot:*\n!${screenshotUrl}!`
+            : '\n\n_(Screenshot could not be captured)_';
 
           await addComment(issueKey,
-            `✅ Theme updated — deployed to staging.\n\n` +
-            `Changed: ${aiResult.summary || fileChanges.map(f => f.file).join(', ')}\n` +
-            `Files: ${fileChanges.map(f => f.file).join(', ')}\n` +
-            `Preview: ${process.env.WP_STAGING_URL}${screenshotLine}\n\n` +
+            `🖼️ Screenshot captured — here is the current staging site:\n` +
+            `Preview URL: ${stagingUrl}${screenshotLine}\n\n` +
             `──────────────────────\n` +
+            `Changed: ${aiResult.summary || fileChanges.map(f => f.file).join(', ')}\n` +
+            `Files: ${fileChanges.map(f => f.file).join(', ')}\n\n` +
             `💬 Commands:\n` +
             `• Drag to *Deployment* to mark as approved\n` +
             `• \`redo: <feedback>\` — request a change\n` +
