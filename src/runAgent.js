@@ -129,19 +129,26 @@ Return JSON exactly like this:
           }
 
           // Commit → push to Bitbucket (pipeline auto-deploys to WP Engine)
-          const { sha: newSha, wpeDeployed } = await commitAndDeploy(
+          const { sha: newSha, wpeDeployed, noChanges } = await commitAndDeploy(
             cloneDir,
             `[AI Agent] ${title} (${issueKey})`
           );
 
-          // ── Step comment: pipeline triggered ──────────────────────────
-          await addComment(issueKey,
-            `🚀 Code committed and pushed to Bitbucket.\n\n` +
-            `Files changed: ${fileChanges.map(f => f.file).join(', ')}\n` +
-            `Commit: \`${newSha.slice(0, 8)}\`\n\n` +
-            `⏳ Bitbucket Pipeline is now running — deploying to WP Engine staging...\n` +
-            `[View pipeline →|https://bitbucket.org/${process.env.BITBUCKET_WORKSPACE || 'cp-jira'}/${process.env.BITBUCKET_REPO_SLUG || 'brindayoga'}/pipelines]`
-          );
+          // ── Step comment: pipeline triggered (or no-op if nothing changed) ──
+          if (noChanges) {
+            await addComment(issueKey,
+              `ℹ️ No file changes needed — staging already reflects this state.\n\n` +
+              `Taking a fresh screenshot to confirm...`
+            );
+          } else {
+            await addComment(issueKey,
+              `🚀 Code committed and pushed to Bitbucket.\n\n` +
+              `Files changed: ${fileChanges.map(f => f.file).join(', ')}\n` +
+              `Commit: \`${newSha.slice(0, 8)}\`\n\n` +
+              `⏳ Bitbucket Pipeline is now running — deploying to WP Engine staging...\n` +
+              `[View pipeline →|https://bitbucket.org/${process.env.BITBUCKET_WORKSPACE || 'cp-jira'}/${process.env.BITBUCKET_REPO_SLUG || 'brindayoga'}/pipelines]`
+            );
+          }
 
           // Store revert metadata
           await setRevertMeta(issueKey, {
@@ -152,8 +159,8 @@ Return JSON exactly like this:
             timestamp: new Date().toISOString()
           });
 
-          // ── Poll Bitbucket until pipeline finishes ─────────────────────
-          const pipelineResult = await pollPipelineUntilDone(newSha);
+          // ── Poll Bitbucket until pipeline finishes (skip if no changes) ──
+          const pipelineResult = noChanges ? 'SUCCESSFUL' : await pollPipelineUntilDone(newSha);
 
           if (pipelineResult === 'FAILED' || pipelineResult === 'STOPPED') {
             await addComment(issueKey,

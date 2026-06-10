@@ -100,8 +100,9 @@ async function commitAndDeploy(cloneDir, commitMessage) {
   await git.add('.');
   const status = await git.status();
   if (status.staged.length === 0) {
-    console.log('⚠️  No changes to commit');
-    return await getCurrentSha(cloneDir);
+    console.log('⚠️  No changes to commit — already at target state');
+    const sha = await getCurrentSha(cloneDir);
+    return { sha, wpeDeployed: false, noChanges: true };
   }
 
   await git.commit(commitMessage);
