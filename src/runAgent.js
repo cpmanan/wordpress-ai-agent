@@ -529,7 +529,9 @@ Return JSON: {
         }
 
         // 1. Homepage — try WP settings first, then slug/title fallbacks
-        const isHomepage = /\b(homepage|home page|front page|home)\b/i.test(title + ' ' + description);
+        // Only check title for homepage intent — description often mentions "homepage" as context/example text
+        const isHomepage = /\b(homepage|home page|front page)\b/i.test(title) ||
+                           /\bfor (the )?(home ?page|front page)\b/i.test(description);
         if (isHomepage) {
           // 1a. WP Reading Settings → page_on_front
           try {
@@ -578,7 +580,8 @@ Return JSON: {
         if (!targetPage) {
           const cleanTitle = title
             .replace(/phase \d+\s*test \d+\s*:?\s*/i, '')
-            .replace(/update\s+seo\s+(meta\s+)?(for\s+(the\s+)?)?/i, '')
+            .replace(/update\s+(seo\s+)?(meta\s*(description\s*)?)?(and\s+seo\s+title\s*)?(for\s+(the\s+)?)?/i, '')
+            .replace(/\s+page\s*$/i, '')  // strip trailing " page"
             .trim();
           console.log(`🔍 Searching for page by title: "${cleanTitle}"`);
           const results = await findPageByTitle(cleanTitle);
