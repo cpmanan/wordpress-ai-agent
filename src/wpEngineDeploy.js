@@ -62,6 +62,17 @@ function readFile(cloneDir, relativePath) {
   return fs.readFileSync(filePath, 'utf8');
 }
 
+// Read the agent context reference file from the child theme repo
+function readAgentContext(cloneDir) {
+  const contextPath = path.join(cloneDir, '_agent-context.md');
+  if (!fs.existsSync(contextPath)) {
+    console.warn('⚠️  _agent-context.md not found in child theme repo');
+    return '';
+  }
+  console.log('📖 Loaded _agent-context.md from child theme repo');
+  return fs.readFileSync(contextPath, 'utf8');
+}
+
 // Write a file — validates path first
 function editFile(cloneDir, relativePath, newContent) {
   const fullRelative = `wp-content/themes/${THEME_NAME}/${relativePath}`;
@@ -145,6 +156,6 @@ function cleanup(cloneDir) {
 }
 
 module.exports = {
-  cloneRepo, getCurrentSha, readFile, editFile,
+  cloneRepo, getCurrentSha, readFile, readAgentContext, editFile,
   commitAndDeploy, purgeCache, revertToSha, cleanup
 };

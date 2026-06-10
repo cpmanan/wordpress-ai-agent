@@ -1,7 +1,8 @@
 const OpenAI = require('openai');
 const { detectTaskType, TASK_TYPES } = require('./taskRouter');
 const { getIssue, addComment, setRevertMeta, transitionIssue, getRevertMeta } = require('./jira');
-const { cloneRepo, getCurrentSha, readFile, editFile, commitAndDeploy, purgeCache, cleanup } = require('./wpEngineDeploy');
+const { cloneRepo, getCurrentSha, readFile, readAgentContext, editFile, commitAndDeploy, purgeCache, cleanup } = require('./wpEngineDeploy');
+const { getParentThemeContext } = require('./viharaContext');
 const { createPost, updatePost, getPost, createPage, updatePage, getPage, searchContent, getPageBySlug, findPageByTitle } = require('./wpRest');
 const { revertTask } = require('./revert');
 const { getMenus, addPageToMenu, addUrlToMenu, getPlugins, installPlugin, deactivatePlugin, updateYoastSeo, exportDb } = require('./wpCli');
@@ -45,8 +46,20 @@ async function runAgent(issueKey, feedbackContext = null) {
           const currentCss       = readFile(cloneDir, 'style.css') || '/* style.css is empty */';
           const currentFunctions = readFile(cloneDir, 'functions.php') || '<?php // functions.php is empty';
 
+          // Read the agent context reference file from child theme repo
+          const agentContext = readAgentContext(cloneDir);
+
+          // Fetch relevant parent theme CSS rules live from the staging site
+          const parentCssContext = await getParentThemeContext(title, description);
+
           // Get SHA before changes (for revert)
           const oldSha = await getCurrentSha(cloneDir);
+
+          // Build context sections for the prompt
+          const contextSection = [
+            agentContext ? `## CHILD THEME SELECTOR REFERENCE (from _agent-context.md):\n${agentContext}` : '',
+            parentCssContext ? `## PARENT THEME EXISTING RULES (live from staging — DO NOT duplicate these, only override):\n\`\`\`css\n${parentCssContext}\n\`\`\`` : '',
+          ].filter(Boolean).join('\n\n---\n\n');
 
           // Ask OpenAI what to change
           const aiResponse = await getOpenAI().chat.completions.create({
@@ -56,34 +69,22 @@ async function runAgent(issueKey, feedbackContext = null) {
                 role: 'system',
                 content: `You are a WordPress child theme developer for Brinda Yoga website.
 The site uses the VIHARA theme (v1.3.5) by ThemeREX. You MUST use Vihara-specific CSS selectors.
-You will receive a task and the current child theme files.
+You will receive:
+1. A task to complete
+2. A selector reference guide (_agent-context.md)
+3. Relevant parent theme CSS rules already in effect (so you know what to override)
+4. The current child theme files
+
 Make ONLY the specific change requested — do not rewrite unrelated styles.
 
-VIHARA THEME CSS SELECTORS (use these — generic selectors like .btn or .button will NOT work):
-- Buttons: .sc_button, .sc_button_default, .sc_button_size_small, .sc_button_size_normal, .sc_button_size_large
-- Button hover: .sc_button:hover, .sc_button_default:hover
-- Section titles (h1 headings): .sc_title_title, .sc_item_title
-- Section subtitles: .sc_item_subtitle, .sc_title_subtitle
-- Main header wrapper: .top_panel
-- Sticky nav bar: .sc_layouts_row_fixed, .sc_layouts_row_fixed_always
-- Nav menu links: .sc_layouts_menu_nav > li > a
-- Body content area: .page_content_wrap
-- Service card buttons: .sc_services_item_button .sc_button
-- Price item buttons: .sc_price_item_link.sc_button
-- "Read More" links: a.more-link
-
-IMPORTANT CSS RULES:
-1. Always use !important for color/background overrides to beat Vihara's specificity
-2. Target VIHARA classes specifically — do NOT use generic HTML tag selectors alone
-3. For sticky header: the header already has .sc_layouts_row_fixed class, add scroll behavior via JS in functions.php if needed
-4. For fonts: the body uses Poppins (sans-serif), headings use Lora (serif)
-5. The child theme style.css loads AFTER parent, so use specific selectors + !important
-
-RULES:
-1. Only edit files that need changing for this task
-2. Return complete file content (not just the diff)
-3. Only touch: style.css, functions.php, or custom PHP template files
-4. Never modify parent theme files
+CRITICAL RULES:
+1. Always use !important on color/background/font overrides — parent theme has high specificity
+2. Use ONLY the Vihara selectors from the reference (e.g. .sc_button NOT .btn)
+3. Check the parent theme CSS provided — your override must be MORE specific or use !important
+4. Return COMPLETE file content (not just the diff)
+5. Only touch: style.css, functions.php, or custom PHP template files
+6. Never modify parent theme files
+7. Preserve the child theme header comment block in style.css (/* Theme Name: Vihara Child */ etc.)
 
 Return JSON exactly like this:
 {
@@ -96,7 +97,7 @@ Return JSON exactly like this:
               },
               {
                 role: 'user',
-                content: `Task: ${title}\n\nDetails: ${description}${feedbackContext ? `\n\nPrevious attempt feedback: ${feedbackContext}` : ''}\n\nCurrent style.css:\n${currentCss}\n\nCurrent functions.php:\n${currentFunctions}`
+                content: `Task: ${title}\n\nDetails: ${description}${feedbackContext ? `\n\nPrevious attempt feedback: ${feedbackContext}` : ''}\n\n${contextSection}\n\n---\n\n## CURRENT CHILD THEME FILES:\n\nCurrent style.css:\n${currentCss}\n\nCurrent functions.php:\n${currentFunctions}`
               }
             ],
             response_format: { type: 'json_object' }
