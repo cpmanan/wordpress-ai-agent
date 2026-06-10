@@ -12,17 +12,17 @@ const WPE_INSTALL_ID  = process.env.WPENGINE_INSTALL_ID;
 const WPE_API_USER    = process.env.WPENGINE_API_USER;
 const WPE_API_PASSWORD = process.env.WPENGINE_API_PASSWORD;
 
-// Bitbucket HTTPS URL (avoids SSH key issues on Railway)
+// Bitbucket HTTPS URL using Repository Access Token
+// Username must be x-token-auth (not email) for Bitbucket repo tokens
 function getRepoUrl() {
-  const user  = encodeURIComponent(process.env.BITBUCKET_USERNAME);
-  const token = encodeURIComponent(process.env.ATLASSIAN_API_TOKEN);
+  const token = encodeURIComponent(process.env.BITBUCKET_ACCESS_TOKEN);
   // Convert git@bitbucket.org:cp-jira/brindayoga.git
-  //      → https://user:token@bitbucket.org/cp-jira/brindayoga.git
+  //      → https://x-token-auth:token@bitbucket.org/cp-jira/brindayoga.git
   const sshUrl = process.env.CHILD_THEME_REPO;
   const httpsBase = sshUrl
     .replace('git@bitbucket.org:', 'bitbucket.org/')
     .replace('.git', '');
-  return `https://${user}:${token}@${httpsBase}.git`;
+  return `https://x-token-auth:${token}@${httpsBase}.git`;
 }
 
 // Write SSH private key for WP Engine GitPush (SSH is only needed for wpengine remote push)
