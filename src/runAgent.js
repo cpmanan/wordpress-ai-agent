@@ -644,21 +644,50 @@ Return JSON: {
 
         const seoData = JSON.parse(seoResponse.choices[0].message.content);
 
-        // 5. Update Yoast SEO via REST API — no SSH needed
-        // Yoast registers these meta fields in the REST API automatically
-        await axios.post(
-          `${WP_BASE}/wp-json/wp/v2/pages/${targetPage.id}`,
-          {
-            meta: {
-              _yoast_wpseo_title:       seoData.seoTitle,
-              _yoast_wpseo_metadesc:    seoData.metaDescription,
-              _yoast_wpseo_focuskw:     seoData.focusKeyword,
-            }
-          },
-          { auth: wpAuth }
-        );
+        // 5. Update Yoast SEO via REST API
+        // Yoast registers _yoast_wpseo_title etc. in the REST API meta namespace.
+        // We also try the yoast_meta key which some Yoast versions prefer.
+        const seoPayload = {
+          meta: {
+            _yoast_wpseo_title:    seoData.seoTitle,
+            _yoast_wpseo_metadesc: seoData.metaDescription,
+            _yoast_wpseo_focuskw:  seoData.focusKeyword,
+          }
+        };
 
-        console.log(`✅ Yoast SEO updated for page ${targetPage.id} via REST API`);
+        let postRes;
+        try {
+          postRes = await axios.post(
+            `${WP_BASE}/wp-json/wp/v2/pages/${targetPage.id}`,
+            seoPayload,
+            { auth: wpAuth }
+          );
+          console.log(`✅ Yoast POST response meta:`, JSON.stringify(postRes.data?.meta || {}).substring(0, 300));
+        } catch (e) {
+          throw new Error(`Yoast REST update failed (${e.response?.status}): ${e.response?.data?.message || e.message}`);
+        }
+
+        // 5b. Verify: read back the page and check yoast_head_json + meta
+        let verifiedTitle = null;
+        let verifiedDesc  = null;
+        let yoastHeadJson = null;
+        try {
+          const verifyRes = await axios.get(
+            `${WP_BASE}/wp-json/wp/v2/pages/${targetPage.id}`,
+            { auth: wpAuth, params: { _fields: 'id,yoast_head_json,meta' } }
+          );
+          const verifyData = verifyRes.data;
+          verifiedTitle = verifyData?.meta?._yoast_wpseo_title || null;
+          verifiedDesc  = verifyData?.meta?._yoast_wpseo_metadesc || null;
+          yoastHeadJson = verifyData?.yoast_head_json || null;
+          console.log(`🔍 Verified meta — title: "${verifiedTitle}", desc: "${verifiedDesc}"`);
+          if (yoastHeadJson?.title) console.log(`🔍 yoast_head_json.title: "${yoastHeadJson.title}"`);
+        } catch (e) {
+          console.warn('⚠️  Could not verify Yoast write:', e.message);
+        }
+
+        const metaWriteConfirmed = verifiedTitle === seoData.seoTitle;
+        console.log(`✅ Yoast SEO updated for page ${targetPage.id} — write confirmed: ${metaWriteConfirmed}`);
 
         // 6. Store revert metadata (saved meta for rollback)
         await setRevertMeta(issueKey, {
@@ -675,11 +704,22 @@ Return JSON: {
         const wpAdminUrl   = `${WP_BASE}/wp-admin/post.php?post=${targetPage.id}&action=edit`;
         const viewSourceTip = `To verify: open the page → right-click → View Page Source → search for \`og:title\` or \`description\``;
 
+        const writeStatus = metaWriteConfirmed
+          ? `✅ Meta write confirmed — values saved in WP database`
+          : `⚠️ Meta write NOT confirmed — stored value: "${verifiedTitle || '(empty)'}" (expected: "${seoData.seoTitle}")\n  → Check WP Admin → Edit page → Yoast SEO section to verify manually`;
+
+        const yoastTitleOutput = yoastHeadJson?.title
+          ? `🔍 Yoast \`<title>\` will render as: *${yoastHeadJson.title}*`
+          : `🔍 yoast_head_json.title not available (may need cache flush)`;
+
         await addComment(issueKey,
-          `✅ SEO metadata updated for *"${targetPage.title?.rendered}"*.\n\n` +
+          `✅ SEO metadata updated for *"${targetPage.title?.rendered}"* (page ID: ${targetPage.id})\n\n` +
           `*SEO Title:* ${seoData.seoTitle}\n` +
           `*Meta Description:* ${seoData.metaDescription}\n` +
           `*Focus Keyword:* ${seoData.focusKeyword}\n\n` +
+          `──────────────────────\n` +
+          `*Write Verification:*\n${writeStatus}\n\n` +
+          `${yoastTitleOutput}\n\n` +
           `──────────────────────\n` +
           `🔗 *Preview & Verify:*\n` +
           `• [View page|${pageUrl}] — check the live page\n` +
