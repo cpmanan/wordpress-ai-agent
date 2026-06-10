@@ -135,18 +135,57 @@ async function purgeCache() {
   }
 }
 
-// Revert to a previous git SHA on WP Engine
+/**
+ * Revert to a previous git SHA by creating a revert commit on Bitbucket.
+ * The Bitbucket Pipeline then deploys to WP Engine automatically — no SSH needed.
+ */
 async function revertToSha(oldSha) {
-  setupSshKey();
   const { cloneDir } = await cloneRepo();
   const git = simpleGit({ baseDir: cloneDir });
   try {
-    await git.addRemote('wpengine', WPE_REMOTE).catch(() => {});
-    await git.push('wpengine', `${oldSha}:master`, ['--force']);
+    await git.addConfig('user.name', 'AI Agent');
+    await git.addConfig('user.email', process.env.ATLASSIAN_EMAIL || 'agent@brindayoga.com');
+
+    // git revert creates a new commit that undoes changes back to oldSha
+    // --no-commit lets us batch multiple reverts; we then commit once
+    // We use reset instead: reset to oldSha then commit the diff
+    const currentLog = await git.log(['-1']);
+    const currentSha = currentLog.latest.hash;
+
+    if (currentSha.startsWith(oldSha.slice(0, 8))) {
+      throw new Error(`Already at SHA ${oldSha.slice(0, 8)} — nothing to revert.`);
+    }
+
+    // Read the file state at oldSha and overwrite current files
+    const files = ['wp-content/themes/' + THEME_NAME + '/style.css',
+                   'wp-content/themes/' + THEME_NAME + '/functions.php'];
+
+    for (const file of files) {
+      try {
+        const content = await git.show([`${oldSha}:${file}`]);
+        const fullPath = path.join(cloneDir, file);
+        require('fs').writeFileSync(fullPath, content, 'utf8');
+        console.log(`✅ Restored ${file} from ${oldSha.slice(0, 8)}`);
+      } catch (e) {
+        console.warn(`⚠️  Could not restore ${file} from ${oldSha}: ${e.message}`);
+      }
+    }
+
+    await git.add('.');
+    const status = await git.status();
+    if (status.staged.length === 0) {
+      throw new Error('No changes found to revert — files may already be at the target state.');
+    }
+
+    await git.commit(`[AI Agent] Revert to state before ${oldSha.slice(0, 8)}`);
+    console.log(`✅ Revert commit created`);
+
+    // Push to Bitbucket → Bitbucket Pipeline deploys to WP Engine
+    const repoUrl = getRepoUrl();
+    await git.push(repoUrl, `HEAD:${BRANCH}`);
+    console.log(`✅ Revert pushed to Bitbucket — pipeline will deploy to WP Engine`);
+
     await purgeCache();
-  } catch (sshErr) {
-    console.warn(`⚠️  WP Engine revert push failed (SSH): ${sshErr.message}`);
-    throw new Error(`Revert to Bitbucket succeeded but WP Engine deploy failed: ${sshErr.message}`);
   } finally {
     cleanup(cloneDir);
   }
