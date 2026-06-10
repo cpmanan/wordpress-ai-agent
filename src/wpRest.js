@@ -109,4 +109,115 @@ async function listPosts(perPage = 100) {
   return res.data;
 }
 
-module.exports = { getPost, getPage, getPageBySlug, findPageByTitle, searchContent, createPost, updatePost, createPage, updatePage, listPosts };
+// ── Navigation Menu REST API (WordPress 5.9+) ─────────────────────────────────
+// Uses wp/v2/menus and wp/v2/menu-items — no SSH or WP CLI needed.
+
+// List all registered nav menus
+async function getMenus() {
+  try {
+    const res = await axios.get(`${BASE_URL}/wp-json/wp/v2/menus`, { auth });
+    return res.data; // array of { id, name, slug, locations, ... }
+  } catch (err) {
+    const detail = err.response?.data?.message || err.message;
+    throw new Error(`getMenus failed (${err.response?.status}): ${detail}`);
+  }
+}
+
+// Get all items in a menu by menu ID
+async function getMenuItems(menuId) {
+  try {
+    const res = await axios.get(`${BASE_URL}/wp-json/wp/v2/menu-items`, {
+      auth,
+      params: { menus: menuId, per_page: 100 }
+    });
+    return res.data;
+  } catch (err) {
+    const detail = err.response?.data?.message || err.message;
+    throw new Error(`getMenuItems failed: ${detail}`);
+  }
+}
+
+// Add a page to a nav menu by menu ID
+async function addPageToMenu(menuIdOrName, pageId, title = '', position = null) {
+  try {
+    // If menuIdOrName is a string name, look up the ID first
+    let menuId = menuIdOrName;
+    if (typeof menuIdOrName === 'string' && isNaN(menuIdOrName)) {
+      const menus = await getMenus();
+      const found = menus.find(m =>
+        m.name.toLowerCase() === menuIdOrName.toLowerCase() ||
+        m.slug.toLowerCase() === menuIdOrName.toLowerCase()
+      );
+      if (!found) throw new Error(`Menu "${menuIdOrName}" not found. Available: ${menus.map(m => m.name).join(', ')}`);
+      menuId = found.id;
+    }
+
+    // Get current item count to determine position if not specified
+    if (!position) {
+      const items = await getMenuItems(menuId);
+      position = items.length + 1;
+    }
+
+    const body = {
+      title:  title || undefined,
+      url:    '',
+      object: 'page',
+      object_id: pageId,
+      menus:  menuId,
+      menu_order: position,
+      type:   'post_type',
+      status: 'publish',
+    };
+
+    const res = await axios.post(`${BASE_URL}/wp-json/wp/v2/menu-items`, body, { auth });
+    console.log(`✅ Added page ${pageId} to menu ${menuId} as item ${res.data.id}`);
+    return res.data;
+  } catch (err) {
+    const detail = err.response?.data?.message || err.response?.data?.code || err.message;
+    throw new Error(`addPageToMenu failed (${err.response?.status}): ${detail}`);
+  }
+}
+
+// Add a custom URL to a nav menu
+async function addUrlToMenu(menuIdOrName, url, title, position = null) {
+  try {
+    let menuId = menuIdOrName;
+    if (typeof menuIdOrName === 'string' && isNaN(menuIdOrName)) {
+      const menus = await getMenus();
+      const found = menus.find(m =>
+        m.name.toLowerCase() === menuIdOrName.toLowerCase() ||
+        m.slug.toLowerCase() === menuIdOrName.toLowerCase()
+      );
+      if (!found) throw new Error(`Menu "${menuIdOrName}" not found.`);
+      menuId = found.id;
+    }
+
+    if (!position) {
+      const items = await getMenuItems(menuId);
+      position = items.length + 1;
+    }
+
+    const body = {
+      title,
+      url,
+      object: 'custom',
+      menus:  menuId,
+      menu_order: position,
+      type:   'custom',
+      status: 'publish',
+    };
+
+    const res = await axios.post(`${BASE_URL}/wp-json/wp/v2/menu-items`, body, { auth });
+    console.log(`✅ Added custom URL "${url}" to menu ${menuId}`);
+    return res.data;
+  } catch (err) {
+    const detail = err.response?.data?.message || err.response?.data?.code || err.message;
+    throw new Error(`addUrlToMenu failed (${err.response?.status}): ${detail}`);
+  }
+}
+
+module.exports = {
+  getPost, getPage, getPageBySlug, findPageByTitle, searchContent,
+  createPost, updatePost, createPage, updatePage, listPosts,
+  getMenus, getMenuItems, addPageToMenu, addUrlToMenu,
+};

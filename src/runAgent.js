@@ -4,9 +4,9 @@ const { getIssue, addComment, setRevertMeta, transitionIssue, getRevertMeta } = 
 const { cloneRepo, getCurrentSha, readFile, readAgentContext, editFile, commitAndDeploy, purgeCache, cleanup, pollPipelineUntilDone } = require('./wpEngineDeploy');
 const { getParentThemeContext } = require('./viharaContext');
 const { capturePreview } = require('./screenshotter');
-const { createPost, updatePost, getPost, createPage, updatePage, getPage, searchContent, getPageBySlug, findPageByTitle } = require('./wpRest');
+const { createPost, updatePost, getPost, createPage, updatePage, getPage, searchContent, getPageBySlug, findPageByTitle, getMenus, addPageToMenu, addUrlToMenu } = require('./wpRest');
 const { revertTask } = require('./revert');
-const { getMenus, addPageToMenu, addUrlToMenu, getPlugins, installPlugin, deactivatePlugin, updateYoastSeo, exportDb } = require('./wpCli');
+const { getPlugins, installPlugin, deactivatePlugin, updateYoastSeo, exportDb } = require('./wpCli');
 
 // Initialize lazily so missing key doesn't crash the server at startup
 let openai;
@@ -424,7 +424,7 @@ Return JSON: { "title": "page title", "content": "full HTML content" }`
       case TASK_TYPES.NAV: {
         // Ask OpenAI what page to create and which menu to add it to
         const menus = await getMenus();
-        const menuList = menus.map(m => `ID: ${m.term_id} | Name: ${m.name}`).join('\n');
+        const menuList = menus.map(m => `ID: ${m.id} | Name: ${m.name} | Slug: ${m.slug}`).join('\n');
 
         const aiResponse = await getOpenAI().chat.completions.create({
           model: 'gpt-4o',
@@ -444,6 +444,7 @@ Return JSON: {
   "pageTitle": "page title",
   "pageContent": "HTML content for the page (if creating new)",
   "menuName": "exact menu name from the list above",
+  "menuId": numeric menu ID from the list above,
   "menuItemTitle": "title to show in the menu",
   "menuPosition": null or number
 }`
@@ -473,8 +474,8 @@ Return JSON: {
         }
 
         // Add to navigation menu
-        if (pageId && navPlan.menuName) {
-          await addPageToMenu(navPlan.menuName, pageId, navPlan.menuItemTitle, navPlan.menuPosition);
+        if (pageId && (navPlan.menuId || navPlan.menuName)) {
+          await addPageToMenu(navPlan.menuId || navPlan.menuName, pageId, navPlan.menuItemTitle, navPlan.menuPosition);
           console.log(`✅ Added to menu: "${navPlan.menuName}"`);
         }
 
