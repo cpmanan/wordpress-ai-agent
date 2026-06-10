@@ -1,62 +1,50 @@
 /**
  * screenshotter.js
  *
- * Takes a full-page screenshot of the staging site after deployment
- * and uploads it to Jira as an issue attachment, then posts it in a comment.
+ * Takes a screenshot of the staging site using thum.io (free, no API key needed)
+ * and uploads it to Jira as an issue attachment.
+ *
+ * Avoids running Chromium on Railway — uses an external screenshot service instead.
  */
 
-const puppeteer = require('puppeteer-core');
-const chromium  = require('@sparticuz/chromium');
-const axios     = require('axios');
-const fs        = require('fs');
-const os        = require('os');
-const path      = require('path');
-const FormData  = require('form-data');
+const axios    = require('axios');
+const fs       = require('fs');
+const os       = require('os');
+const path     = require('path');
+const FormData = require('form-data');
 
 const JIRA_BASE      = process.env.JIRA_BASE_URL || 'https://cp-jira.atlassian.net';
 const JIRA_EMAIL     = process.env.ATLASSIAN_EMAIL;
 const JIRA_API_TOKEN = process.env.ATLASSIAN_API_TOKEN;
-const CLOUD_ID       = process.env.JIRA_CLOUD_ID || 'a3fb9302-bf50-4c4e-abe1-01f661ccb93c';
 const WP_URL         = process.env.WP_STAGING_URL || 'https://brindayogacstg.wpenginepowered.com';
 
 /**
- * Launch headless Chromium and take a full-page screenshot.
+ * Fetch a screenshot via thum.io and save to a temp file.
+ * thum.io is free, no API key required.
  * Returns the path to the saved PNG file.
  */
 async function takeScreenshot(url) {
-  console.log(`📸 Taking screenshot of ${url}...`);
+  console.log(`📸 Taking screenshot of ${url} via thum.io...`);
 
-  const browser = await puppeteer.launch({
-    args:            chromium.args,
-    defaultViewport: { width: 1440, height: 900 },
-    executablePath:  await chromium.executablePath(),
-    headless:        chromium.headless,
+  // thum.io params: width=1440, crop height=900 (above-the-fold)
+  const screenshotApiUrl = `https://image.thum.io/get/width/1440/crop/900/noanimate/${encodeURIComponent(url)}`;
+
+  const response = await axios.get(screenshotApiUrl, {
+    responseType: 'arraybuffer',
+    timeout: 30000,
+    headers: { 'Accept': 'image/png,image/jpeg,image/*' },
   });
 
-  try {
-    const page = await browser.newPage();
+  const screenshotPath = path.join(os.tmpdir(), `preview-${Date.now()}.png`);
+  fs.writeFileSync(screenshotPath, response.data);
 
-    // Bypass cookie banners / popups
-    await page.setExtraHTTPHeaders({ 'Cache-Control': 'no-cache' });
-
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-
-    // Wait a beat for fonts/animations to settle
-    await new Promise(r => setTimeout(r, 2000));
-
-    const screenshotPath = path.join(os.tmpdir(), `preview-${Date.now()}.png`);
-    await page.screenshot({ path: screenshotPath, fullPage: false }); // viewport only — faster
-
-    console.log(`✅ Screenshot saved: ${screenshotPath}`);
-    return screenshotPath;
-  } finally {
-    await browser.close();
-  }
+  console.log(`✅ Screenshot saved (${response.data.byteLength} bytes): ${screenshotPath}`);
+  return screenshotPath;
 }
 
 /**
  * Upload screenshot as a Jira issue attachment.
- * Returns the attachment URL.
+ * Returns the attachment content URL (shown inline in Jira comments).
  */
 async function uploadToJira(issueKey, screenshotPath) {
   console.log(`📎 Uploading screenshot to Jira issue ${issueKey}...`);
@@ -75,20 +63,20 @@ async function uploadToJira(issueKey, screenshotPath) {
     {
       headers: {
         ...form.getHeaders(),
-        'Authorization': `Basic ${auth}`,
-        'X-Atlassian-Token': 'no-check',
+        'Authorization':      `Basic ${auth}`,
+        'X-Atlassian-Token':  'no-check',
       },
     }
   );
 
   const attachment = res.data[0];
-  console.log(`✅ Attachment uploaded: ${attachment.content}`);
-  return attachment.content; // direct download URL
+  console.log(`✅ Attachment uploaded: ${attachment.filename}`);
+  return attachment.content; // direct URL usable in Jira comment
 }
 
 /**
- * Main export: take screenshot of staging, upload to Jira, return image URL.
- * Fails gracefully — screenshot is nice-to-have, not critical.
+ * Main export: screenshot staging → upload to Jira → return attachment URL.
+ * Fails gracefully — screenshot is nice-to-have, not critical to the deploy flow.
  */
 async function capturePreview(issueKey) {
   try {
