@@ -227,26 +227,35 @@ Return JSON exactly like this:
         let existingPage = null;
 
         if (!isBlogPost) {
-          // Try slug match first (most accurate)
-          for (const slug of slugHints) {
-            existingPage = await getPageBySlug(slug);
-            if (existingPage) break;
+          // 0. Explicit page ID in description — most specific, try first
+          const explicitIdMatch = (description).match(/page\s+id[:\s]+(\d+)/i);
+          if (explicitIdMatch) {
+            try {
+              existingPage = await getPage(parseInt(explicitIdMatch[1]));
+              console.log(`✅ Found page by explicit ID ${explicitIdMatch[1]}: "${existingPage.title?.rendered}"`);
+            } catch (e) { console.warn(`⚠️  Explicit page ID ${explicitIdMatch[1]} not found:`, e.message); }
           }
 
-          // Fall back to title search
+          // 1. Slug match
+          if (!existingPage) {
+            for (const slug of slugHints) {
+              existingPage = await getPageBySlug(slug);
+              if (existingPage) break;
+            }
+          }
+
+          // 2. Title search
           if (!existingPage) {
             const searchResults = await findPageByTitle(slugHints[0] || titleWords[0] || title);
             if (searchResults.length > 0) existingPage = searchResults[0];
           }
 
-          // Also try general search
+          // 3. General search
           if (!existingPage) {
             const generalSearch = await searchContent(title);
             if (generalSearch.length > 0) {
               const pageResult = generalSearch.find(r => r.subtype === 'page');
-              if (pageResult) {
-                existingPage = await getPage(pageResult.id);
-              }
+              if (pageResult) existingPage = await getPage(pageResult.id);
             }
           }
         }
@@ -284,14 +293,21 @@ Return JSON exactly like this:
             break;
           }
 
-          // Ask OpenAI to make ONLY the requested change
-          // Rules: preserve ALL existing HTML, only change what was asked
-          const aiResponse = await getOpenAI().chat.completions.create({
-            model: 'gpt-4o',
-            messages: [
-              {
-                role: 'system',
-                content: `You are a surgical WordPress page editor. Your ONLY job is to find and change the specific text mentioned in the task.
+          // Detect full-replace intent: "replace", "rewrite", or page ID explicitly specified in description
+          const isFullReplace = /\b(replace|rewrite|rebuild|new content|full content)\b/i.test(title + ' ' + description)
+            || /page id\s*\d+/i.test(description)
+            || currentContent.trim() === '';
+
+          // Ask OpenAI to edit the page content
+          const systemPrompt = isFullReplace
+            ? `You are a WordPress content writer for Brinda Yoga. Your job is to write completely new page content as specified in the task.
+Return JSON: {
+  "title": "page title (keep existing unless task specifies a new one)",
+  "content": "full new HTML content for the page",
+  "changed": true,
+  "what_changed": "Replaced entire page content as requested"
+}`
+            : `You are a surgical WordPress page editor. Your ONLY job is to find and change the specific text mentioned in the task.
 
 STRICT RULES:
 1. Return the COMPLETE original HTML with ONLY the requested text changed
@@ -306,11 +322,17 @@ Return JSON: {
   "content": "complete HTML with only the specific change applied",
   "changed": true or false,
   "what_changed": "brief description of exactly what was changed"
-}`
-              },
+}`;
+
+          const aiResponse = await getOpenAI().chat.completions.create({
+            model: 'gpt-4o',
+            messages: [
+              { role: 'system', content: systemPrompt },
               {
                 role: 'user',
-                content: `Task: ${title}\n\nDetails: ${description}\n\nCurrent title: ${currentTitle}\n\nCurrent HTML:\n${currentContent}`
+                content: isFullReplace
+                  ? `Task: ${title}\n\nDetails: ${description}\n\nCurrent title: ${currentTitle}`
+                  : `Task: ${title}\n\nDetails: ${description}\n\nCurrent title: ${currentTitle}\n\nCurrent HTML:\n${currentContent}`
               }
             ],
             response_format: { type: 'json_object' }
