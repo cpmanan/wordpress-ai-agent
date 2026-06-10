@@ -644,50 +644,58 @@ Return JSON: {
 
         const seoData = JSON.parse(seoResponse.choices[0].message.content);
 
-        // 5. Update Yoast SEO via REST API
-        // Yoast registers _yoast_wpseo_title etc. in the REST API meta namespace.
-        // We also try the yoast_meta key which some Yoast versions prefer.
-        const seoPayload = {
-          meta: {
-            _yoast_wpseo_title:    seoData.seoTitle,
-            _yoast_wpseo_metadesc: seoData.metaDescription,
-            _yoast_wpseo_focuskw:  seoData.focusKeyword,
-          }
-        };
-
-        let postRes;
+        // 5. Update Yoast SEO via WP CLI (SSH) — direct wp_postmeta write.
+        // The REST API approach (meta._yoast_wpseo_title) silently fails because
+        // WordPress blocks writes to "_"-prefixed protected meta keys via REST unless
+        // the plugin registers a custom auth_callback — which Yoast does not do reliably.
+        // WP CLI bypasses this and writes directly to the database.
+        let metaWriteConfirmed = false;
+        let writeMethod = 'unknown';
         try {
-          postRes = await axios.post(
-            `${WP_BASE}/wp-json/wp/v2/pages/${targetPage.id}`,
-            seoPayload,
-            { auth: wpAuth }
-          );
-          console.log(`✅ Yoast POST response meta:`, JSON.stringify(postRes.data?.meta || {}).substring(0, 300));
-        } catch (e) {
-          throw new Error(`Yoast REST update failed (${e.response?.status}): ${e.response?.data?.message || e.message}`);
+          await updateYoastSeo(targetPage.id, {
+            title:        seoData.seoTitle,
+            description:  seoData.metaDescription,
+            focusKeyword: seoData.focusKeyword,
+          });
+          metaWriteConfirmed = true;
+          writeMethod = 'WP CLI (SSH)';
+          console.log(`✅ Yoast SEO updated via WP CLI for page ${targetPage.id}`);
+        } catch (sshErr) {
+          // SSH unavailable — fall back to REST API (may silently fail on protected meta)
+          console.warn(`⚠️  WP CLI failed (${sshErr.message}), falling back to REST API...`);
+          writeMethod = 'REST API (fallback)';
+          try {
+            await axios.post(
+              `${WP_BASE}/wp-json/wp/v2/pages/${targetPage.id}`,
+              { meta: {
+                  _yoast_wpseo_title:    seoData.seoTitle,
+                  _yoast_wpseo_metadesc: seoData.metaDescription,
+                  _yoast_wpseo_focuskw:  seoData.focusKeyword,
+              } },
+              { auth: wpAuth }
+            );
+          } catch (restErr) {
+            throw new Error(`Both WP CLI and REST API failed. SSH: ${sshErr.message}. REST: ${restErr.response?.data?.message || restErr.message}`);
+          }
         }
 
-        // 5b. Verify: read back the page and check yoast_head_json + meta
-        let verifiedTitle = null;
-        let verifiedDesc  = null;
+        // 5b. Verify via REST API — read back yoast_head_json
         let yoastHeadJson = null;
+        let verifiedTitle = null;
         try {
           const verifyRes = await axios.get(
             `${WP_BASE}/wp-json/wp/v2/pages/${targetPage.id}`,
             { auth: wpAuth, params: { _fields: 'id,yoast_head_json,meta' } }
           );
-          const verifyData = verifyRes.data;
-          verifiedTitle = verifyData?.meta?._yoast_wpseo_title || null;
-          verifiedDesc  = verifyData?.meta?._yoast_wpseo_metadesc || null;
-          yoastHeadJson = verifyData?.yoast_head_json || null;
-          console.log(`🔍 Verified meta — title: "${verifiedTitle}", desc: "${verifiedDesc}"`);
-          if (yoastHeadJson?.title) console.log(`🔍 yoast_head_json.title: "${yoastHeadJson.title}"`);
+          verifiedTitle = verifyRes.data?.meta?._yoast_wpseo_title || null;
+          yoastHeadJson = verifyRes.data?.yoast_head_json || null;
+          if (!metaWriteConfirmed) {
+            metaWriteConfirmed = verifiedTitle === seoData.seoTitle;
+          }
+          console.log(`🔍 Verified — stored title: "${verifiedTitle}", yoast title: "${yoastHeadJson?.title || '?'}"`);
         } catch (e) {
           console.warn('⚠️  Could not verify Yoast write:', e.message);
         }
-
-        const metaWriteConfirmed = verifiedTitle === seoData.seoTitle;
-        console.log(`✅ Yoast SEO updated for page ${targetPage.id} — write confirmed: ${metaWriteConfirmed}`);
 
         // 6. Store revert metadata (saved meta for rollback)
         await setRevertMeta(issueKey, {
@@ -705,12 +713,12 @@ Return JSON: {
         const viewSourceTip = `To verify: open the page → right-click → View Page Source → search for \`og:title\` or \`description\``;
 
         const writeStatus = metaWriteConfirmed
-          ? `✅ Meta write confirmed — values saved in WP database`
-          : `⚠️ Meta write NOT confirmed — stored value: "${verifiedTitle || '(empty)'}" (expected: "${seoData.seoTitle}")\n  → Check WP Admin → Edit page → Yoast SEO section to verify manually`;
+          ? `✅ Meta write confirmed via *${writeMethod}*`
+          : `⚠️ Meta write unconfirmed (method: ${writeMethod}) — stored: "${verifiedTitle || '(empty)'}"\n  → Check WP Admin → Edit page → Yoast SEO section`;
 
         const yoastTitleOutput = yoastHeadJson?.title
           ? `🔍 Yoast \`<title>\` will render as: *${yoastHeadJson.title}*`
-          : `🔍 yoast_head_json.title not available (may need cache flush)`;
+          : `🔍 Yoast head JSON not available in REST response (normal on some setups)`;
 
         await addComment(issueKey,
           `✅ SEO metadata updated for *"${targetPage.title?.rendered}"* (page ID: ${targetPage.id})\n\n` +
