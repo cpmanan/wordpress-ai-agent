@@ -33,8 +33,13 @@ async function takeScreenshot(url) {
   //   meta=false             → skip metadata extraction, just screenshot
   //   fullPage=true          → scroll and capture entire page height
   //   viewport.width=1440    → desktop width
-  //   waitFor=3000           → wait 3s for animations/lazy images to load
+  //   waitFor=6000           → wait 6s for fonts, images, and CSS animations to fully load
   //   force=true             → bypass microlink's own CDN cache — always re-render fresh
+  //   headers.*              → sent to WP Engine when loading the page:
+  //                            Cache-Control: no-cache  → bypasses WP Engine page cache
+  //                            Pragma: no-cache         → bypasses any HTTP/1.0 proxy cache
+  //                            This forces WP Engine to serve fresh HTML with the latest
+  //                            CSS ?ver= URL instead of the cached old HTML.
   const apiUrl = 'https://api.microlink.io';
   const params = {
     url,
@@ -43,8 +48,10 @@ async function takeScreenshot(url) {
     fullPage: true,
     'viewport.width': 1440,
     'viewport.height': 900,
-    waitFor: 6000, // wait 6s for fonts, images, and CSS animations to fully load
-    force: true,   // ← critical: don't serve cached screenshot from previous runs
+    waitFor: 6000,
+    force: true,
+    'headers.Cache-Control': 'no-cache, no-store, must-revalidate',
+    'headers.Pragma': 'no-cache',
   };
 
   console.log('⏳ Waiting for microlink.io to render full page...');
