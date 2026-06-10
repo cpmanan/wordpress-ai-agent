@@ -215,8 +215,8 @@ Return JSON exactly like this:
             : '\n\n_(Screenshot could not be captured)_';
 
           await addComment(issueKey,
-            `🖼️ Screenshot captured — here is the current staging site:\n` +
-            `Preview URL: ${stagingUrl}${screenshotLine}\n\n` +
+            `🖼️ Screenshot captured — here is the updated page:\n` +
+            `Preview URL: ${changedPageUrl}${screenshotLine}\n\n` +
             `──────────────────────\n` +
             `Changed: ${aiResult.summary || fileChanges.map(f => f.file).join(', ')}\n` +
             `Files: ${fileChanges.map(f => f.file).join(', ')}\n\n` +
