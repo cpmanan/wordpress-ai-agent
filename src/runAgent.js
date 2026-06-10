@@ -179,14 +179,10 @@ Return JSON exactly like this:
 
           await transitionIssue(issueKey, 'In Review');
 
-          // ── Screenshot: force fresh, cache-busted URL ──────────────────
-          // Append ?nocache=<timestamp> so microlink.io fetches a brand-new page
-          // (not a cached render) on every run.
+          // ── Screenshot: screenshotter.js appends ?nocache=<timestamp> automatically
           const stagingUrl = process.env.WP_STAGING_URL || 'https://brindayogacstg.wpenginepowered.com';
-          const freshUrl   = `${stagingUrl}?nocache=${Date.now()}`;
-
-          console.log(`📸 Taking screenshot of fresh URL: ${freshUrl}`);
-          const screenshotUrl = await capturePreview(issueKey, freshUrl);
+          console.log(`📸 Taking screenshot of staging site...`);
+          const screenshotUrl = await capturePreview(issueKey, stagingUrl);
 
           const screenshotLine = screenshotUrl
             ? `\n\n📸 *Full-page preview screenshot:*\n!${screenshotUrl}!`

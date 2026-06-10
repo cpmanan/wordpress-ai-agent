@@ -1,11 +1,13 @@
 /**
  * screenshotter.js
  *
- * Takes a full-page screenshot using microlink.io (free, no API key, Playwright-powered).
+ * Takes a full-page screenshot using microlink.io (free tier, no API key).
  * Downloads the image and uploads it to Jira as an issue attachment.
  *
- * microlink.io renders pages with a real headless browser (Playwright), so JS/CSS
- * all execute fully before the screenshot is taken — reliable full-page captures.
+ * Free tier limits: 50 req/day, no custom headers, no force param.
+ * Cache busting is handled by appending ?nocache=<timestamp> to the URL
+ * before passing it to microlink — this makes every request a unique URL
+ * so microlink always renders fresh.
  */
 
 const axios    = require('axios');
@@ -20,50 +22,36 @@ const JIRA_API_TOKEN = process.env.ATLASSIAN_API_TOKEN;
 const WP_URL         = process.env.WP_STAGING_URL || 'https://brindayogacstg.wpenginepowered.com';
 
 /**
- * Take a full-page screenshot via microlink.io.
- * microlink.io uses Playwright under the hood — full JS rendering, full-page capture.
- * Free tier: 50 req/day, no API key needed.
- * Returns path to saved PNG file.
+ * Take a full-page screenshot via microlink.io free tier.
+ * Cache busting: ?nocache=<timestamp> appended to URL = unique URL each run
+ * = microlink always fetches fresh (it caches by URL).
  */
 async function takeScreenshot(url) {
-  console.log(`📸 Taking full-page screenshot of ${url} via microlink.io (Playwright)...`);
+  // Append cache-buster to URL so microlink never serves a cached render
+  const separator = url.includes('?') ? '&' : '?';
+  const freshUrl  = `${url}${separator}nocache=${Date.now()}`;
 
-  // microlink.io API:
-  //   screenshot=true        → capture screenshot
-  //   meta=false             → skip metadata extraction, just screenshot
-  //   fullPage=true          → scroll and capture entire page height
-  //   viewport.width=1440    → desktop width
-  //   waitFor=6000           → wait 6s for fonts, images, and CSS animations to fully load
-  //   force=true             → bypass microlink's own CDN cache — always re-render fresh
-  //   headers.*              → sent to WP Engine when loading the page:
-  //                            Cache-Control: no-cache  → bypasses WP Engine page cache
-  //                            Pragma: no-cache         → bypasses any HTTP/1.0 proxy cache
-  //                            This forces WP Engine to serve fresh HTML with the latest
-  //                            CSS ?ver= URL instead of the cached old HTML.
-  const apiUrl = 'https://api.microlink.io';
-  const params = {
-    url,
-    screenshot: true,
-    meta: false,
-    fullPage: true,
-    'viewport.width': 1440,
-    'viewport.height': 900,
-    waitFor: 6000,
-    force: true,
-    'headers.Cache-Control': 'no-cache, no-store, must-revalidate',
-    'headers.Pragma': 'no-cache',
-  };
+  console.log(`📸 Taking full-page screenshot of ${freshUrl} via microlink.io...`);
 
-  console.log('⏳ Waiting for microlink.io to render full page...');
-  const apiRes = await axios.get(apiUrl, {
-    params,
+  const apiRes = await axios.get('https://api.microlink.io', {
+    params: {
+      url:              freshUrl,
+      screenshot:       true,
+      meta:             false,
+      fullPage:         true,
+      'viewport.width': 1440,
+      waitFor:          5000,   // wait 5s for CSS/fonts/images to load
+    },
     timeout: 60000,
     headers: { 'Accept': 'application/json' },
   });
 
+  // Log full response for debugging
+  console.log(`📡 microlink status: ${apiRes.data?.status}, code: ${apiRes.data?.data?.screenshot ? 'has screenshot' : 'no screenshot'}`);
+
   const screenshotUrl = apiRes.data?.data?.screenshot?.url;
   if (!screenshotUrl) {
-    throw new Error(`microlink.io did not return a screenshot URL. Response: ${JSON.stringify(apiRes.data)}`);
+    throw new Error(`microlink.io did not return screenshot URL. Response: ${JSON.stringify(apiRes.data).substring(0, 300)}`);
   }
 
   console.log(`📥 Downloading screenshot from: ${screenshotUrl}`);
@@ -100,27 +88,28 @@ async function uploadToJira(issueKey, screenshotPath) {
     {
       headers: {
         ...form.getHeaders(),
-        'Authorization':      `Basic ${auth}`,
-        'X-Atlassian-Token':  'no-check',
+        'Authorization':     `Basic ${auth}`,
+        'X-Atlassian-Token': 'no-check',
       },
     }
   );
 
   const attachment = res.data[0];
   console.log(`✅ Attachment uploaded: ${attachment.filename}`);
-  return attachment.content; // direct URL usable in Jira comment
+  return attachment.content;
 }
 
 /**
  * Main export: screenshot staging → upload to Jira → return attachment URL.
  * Fails gracefully — screenshot is nice-to-have, not critical to the deploy flow.
+ * urlOverride: pass a custom URL (already has ?nocache if needed); we'll add one if not present.
  */
 async function capturePreview(issueKey, urlOverride) {
   try {
-    const screenshotPath = await takeScreenshot(urlOverride || WP_URL);
+    const baseUrl        = urlOverride || WP_URL;
+    const screenshotPath = await takeScreenshot(baseUrl);
     const imageUrl       = await uploadToJira(issueKey, screenshotPath);
 
-    // Clean up temp file
     try { fs.unlinkSync(screenshotPath); } catch (_) {}
 
     return imageUrl;
