@@ -186,10 +186,19 @@ Return JSON exactly like this:
 
           await transitionIssue(issueKey, 'In Review');
 
-          // ── Screenshot: screenshotter.js appends ?nocache=<timestamp> automatically
-          const stagingUrl = process.env.WP_STAGING_URL || 'https://brindayogacstg.wpenginepowered.com';
-          console.log(`📸 Taking screenshot of staging site...`);
-          const screenshotUrl = await capturePreview(issueKey, stagingUrl);
+          // ── Screenshot: use specific page URL if mentioned, otherwise homepage
+          // CSS tasks affect the whole site so homepage is fine;
+          // but if task mentions a specific page (e.g. FAQ), screenshot that page.
+          const pageUrlMatch = (title + ' ' + description).match(/https?:\/\/[^\s|"')]+/);
+          const slugForScreenshot = (title + ' ' + description).toLowerCase()
+            .match(/\b(faq|about|contact|services|classes|blog|schedule|team|gallery|pricing|booking)\b/)?.[0];
+          const changedPageUrl = pageUrlMatch
+            ? pageUrlMatch[0].replace(/[|"')]+$/, '')
+            : slugForScreenshot
+              ? `${process.env.WP_STAGING_URL}/${slugForScreenshot}/`
+              : process.env.WP_STAGING_URL;
+          console.log(`📸 Taking screenshot of ${changedPageUrl}...`);
+          const screenshotUrl = await capturePreview(issueKey, changedPageUrl);
 
           const screenshotLine = screenshotUrl
             ? `\n\n📸 *Full-page preview screenshot:*\n!${screenshotUrl}!`
@@ -431,11 +440,17 @@ Return JSON: { "title": "page title", "content": "full HTML content" }`
           ? `${process.env.WP_STAGING_URL}/?page_id=${postId}&preview=true`
           : `${process.env.WP_STAGING_URL}/?p=${postId}&preview=true`;
 
+        // Screenshot of the specific page/post (not homepage)
+        const contentScreenshotUrl = await capturePreview(issueKey, previewUrl);
+        const contentScreenshotLine = contentScreenshotUrl
+          ? `\n\n📸 *Preview screenshot:*\n!${contentScreenshotUrl}!`
+          : '';
+
         const contentLabel = contentIsPage ? 'Page' : 'Blog post';
         await addComment(issueKey,
           `✅ ${contentLabel} ${action === 'update' ? 'updated' : 'created'} as draft.\n\n` +
           `${existingPage ? `Page: "${existingPage.title?.rendered}"` : `New ${contentLabel.toLowerCase()} created`}\n` +
-          `Preview: ${previewUrl}\n\n` +
+          `Preview: ${previewUrl}${contentScreenshotLine}\n\n` +
           `──────────────────────\n` +
           `💬 Commands:\n` +
           `• Drag to *Deployment* column to publish live\n` +
