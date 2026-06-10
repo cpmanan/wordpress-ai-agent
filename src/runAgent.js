@@ -186,17 +186,27 @@ Return JSON exactly like this:
 
           await transitionIssue(issueKey, 'In Review');
 
-          // ── Screenshot: use specific page URL if mentioned, otherwise homepage
-          // CSS tasks affect the whole site so homepage is fine;
-          // but if task mentions a specific page (e.g. FAQ), screenshot that page.
-          const pageUrlMatch = (title + ' ' + description).match(/https?:\/\/[^\s|"')]+/);
-          const slugForScreenshot = (title + ' ' + description).toLowerCase()
-            .match(/\b(faq|about|contact|services|classes|blog|schedule|team|gallery|pricing|booking)\b/)?.[0];
-          const changedPageUrl = pageUrlMatch
-            ? pageUrlMatch[0].replace(/[|"')]+$/, '')
-            : slugForScreenshot
-              ? `${process.env.WP_STAGING_URL}/${slugForScreenshot}/`
-              : process.env.WP_STAGING_URL;
+          // ── Screenshot: look up the actual page URL rather than guessing from slug
+          let changedPageUrl = process.env.WP_STAGING_URL; // default: homepage
+          const pageUrlMatch = (title + ' ' + description).match(/https?:\/\/[^\s|"')>\]]+/);
+          if (pageUrlMatch) {
+            changedPageUrl = pageUrlMatch[0].replace(/[|"')>\]]+$/, '');
+          } else {
+            // Try to look up the page by slug hint and get its real WP link
+            const slugHintMatch = (title + ' ' + description).toLowerCase()
+              .match(/\b(faq|about|about-us|contact|services|classes|blog|schedule|team|gallery|pricing|booking|home)\b/);
+            if (slugHintMatch) {
+              try {
+                const { getPageBySlug, findPageByTitle } = require('./wpRest');
+                const hintPage = await getPageBySlug(slugHintMatch[0])
+                  || (await findPageByTitle(slugHintMatch[0]))?.[0];
+                if (hintPage?.link) {
+                  changedPageUrl = hintPage.link;
+                  console.log(`📸 Resolved page URL from slug "${slugHintMatch[0]}": ${changedPageUrl}`);
+                }
+              } catch (e) { console.warn('⚠️  Could not resolve page URL for screenshot:', e.message); }
+            }
+          }
           console.log(`📸 Taking screenshot of ${changedPageUrl}...`);
           const screenshotUrl = await capturePreview(issueKey, changedPageUrl);
 
@@ -440,10 +450,15 @@ Return JSON: { "title": "page title", "content": "full HTML content" }`
           ? `${process.env.WP_STAGING_URL}/?page_id=${postId}&preview=true`
           : `${process.env.WP_STAGING_URL}/?p=${postId}&preview=true`;
 
-        // Screenshot of the specific page/post (not homepage)
-        const contentScreenshotUrl = await capturePreview(issueKey, previewUrl);
+        // Screenshot: only works for published pages (preview URLs require WP auth)
+        // Use the page's public link if it's already published, skip for drafts
+        const existingStatus = existingPage?.status || 'draft';
+        const publicLink = existingPage?.link || null;
+        const contentScreenshotUrl = (existingStatus === 'publish' && publicLink)
+          ? await capturePreview(issueKey, publicLink)
+          : null;
         const contentScreenshotLine = contentScreenshotUrl
-          ? `\n\n📸 *Preview screenshot:*\n!${contentScreenshotUrl}!`
+          ? `\n\n📸 *Page screenshot:*\n!${contentScreenshotUrl}!`
           : '';
 
         const contentLabel = contentIsPage ? 'Page' : 'Blog post';
