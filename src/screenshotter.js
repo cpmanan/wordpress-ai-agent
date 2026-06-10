@@ -26,9 +26,9 @@ const WP_URL         = process.env.WP_STAGING_URL || 'https://brindayogacstg.wpe
 async function takeScreenshot(url) {
   console.log(`📸 Taking screenshot of ${url} via thum.io...`);
 
-  // thum.io params: width=1440, crop height=900 (above-the-fold)
+  // thum.io full-page screenshot at 1440px wide
   // URL must NOT be encoded — thum.io appends it directly after the path
-  const screenshotApiUrl = `https://image.thum.io/get/width/1440/crop/900/noanimate/${url}`;
+  const screenshotApiUrl = `https://image.thum.io/get/fullpage/width/1440/noanimate/${url}`;
 
   const response = await axios.get(screenshotApiUrl, {
     responseType: 'arraybuffer',
