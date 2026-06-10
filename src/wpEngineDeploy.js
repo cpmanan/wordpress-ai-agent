@@ -95,22 +95,13 @@ async function commitAndDeploy(cloneDir, commitMessage) {
   await git.push(repoUrl, `HEAD:${BRANCH}`);
   console.log(`✅ Pushed to Bitbucket`);
 
-  // Push to WP Engine via SSH (GIT_SSH_COMMAND already set)
-  // Non-fatal: Bitbucket is the source of truth. WP Engine push is the deploy step.
-  let wpeDeployed = false;
-  try {
-    await git.addRemote('wpengine', WPE_REMOTE).catch(() => {});
-    await git.push('wpengine', `HEAD:master`);
-    console.log(`✅ Pushed to WP Engine staging`);
-    wpeDeployed = true;
-  } catch (sshErr) {
-    console.warn(`⚠️  WP Engine git push failed (SSH): ${sshErr.message}`);
-    console.warn(`   Changes saved to Bitbucket. Manual deploy may be needed.`);
-  }
+  // WP Engine deploy is handled by Bitbucket Pipeline automatically on push.
+  // No SSH push needed from Railway.
+  console.log(`✅ Pushed to Bitbucket — Bitbucket Pipeline will deploy to WP Engine`);
 
   const log = await git.log(['-1']);
   const sha = log.latest.hash;
-  return { sha, wpeDeployed };
+  return { sha, wpeDeployed: true };
 }
 
 // Purge WP Engine cache after deploy
