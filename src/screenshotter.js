@@ -28,8 +28,10 @@ const WP_URL         = process.env.WP_STAGING_URL || 'https://brindayogacstg.wpe
  */
 async function takeScreenshot(url) {
   // Append cache-buster to URL so microlink never serves a cached render
-  const separator = url.includes('?') ? '&' : '?';
-  const freshUrl  = `${url}${separator}nocache=${Date.now()}`;
+  // Ensure trailing slash before ? to avoid 400 errors (e.g. domain.com?x vs domain.com/?x)
+  let baseUrl = url.replace(/\/?$/, '/'); // ensure trailing slash
+  const separator = baseUrl.includes('?') ? '&' : '?';
+  const freshUrl  = `${baseUrl}${separator}nocache=${Date.now()}`;
 
   console.log(`📸 Taking full-page screenshot of ${freshUrl} via microlink.io...`);
 
