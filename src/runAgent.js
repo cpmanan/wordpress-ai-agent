@@ -491,7 +491,7 @@ Return JSON: {
           timestamp: new Date().toISOString()
         });
 
-        await transitionIssue(issueKey, 'In Review');
+        await transitionIssue(issueKey, 'Done');
 
         const previewUrl = pageId
           ? `${process.env.WP_STAGING_URL}/?page_id=${pageId}&preview=true`
@@ -504,7 +504,6 @@ Return JSON: {
           `Preview: ${previewUrl}\n\n` +
           `──────────────────────\n` +
           `💬 Available commands:\n` +
-          `• Drag to *Deployment* to publish live\n` +
           `• \`redo: <feedback>\` — make changes\n` +
           `• \`revert\` — undo everything`
         );
@@ -750,7 +749,7 @@ add_action('rest_api_init', function() {
           timestamp: new Date().toISOString()
         });
 
-        await transitionIssue(issueKey, 'In Review');
+        await transitionIssue(issueKey, 'Done');
 
         // Build preview & verification URLs
         const pageUrl      = targetPage.link || `${WP_BASE}/?page_id=${targetPage.id}`;
