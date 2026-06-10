@@ -1,10 +1,11 @@
 /**
  * screenshotter.js
  *
- * Takes a screenshot of the staging site using thum.io (free, no API key needed)
- * and uploads it to Jira as an issue attachment.
+ * Takes a full-page screenshot using microlink.io (free, no API key, Playwright-powered).
+ * Downloads the image and uploads it to Jira as an issue attachment.
  *
- * Avoids running Chromium on Railway — uses an external screenshot service instead.
+ * microlink.io renders pages with a real headless browser (Playwright), so JS/CSS
+ * all execute fully before the screenshot is taken — reliable full-page captures.
  */
 
 const axios    = require('axios');
@@ -19,27 +20,53 @@ const JIRA_API_TOKEN = process.env.ATLASSIAN_API_TOKEN;
 const WP_URL         = process.env.WP_STAGING_URL || 'https://brindayogacstg.wpenginepowered.com';
 
 /**
- * Fetch a screenshot via thum.io and save to a temp file.
- * thum.io is free, no API key required.
- * Returns the path to the saved PNG file.
+ * Take a full-page screenshot via microlink.io.
+ * microlink.io uses Playwright under the hood — full JS rendering, full-page capture.
+ * Free tier: 50 req/day, no API key needed.
+ * Returns path to saved PNG file.
  */
 async function takeScreenshot(url) {
-  console.log(`📸 Taking screenshot of ${url} via thum.io...`);
+  console.log(`📸 Taking full-page screenshot of ${url} via microlink.io (Playwright)...`);
 
-  // thum.io full-page screenshot at 1440px wide
-  // URL must NOT be encoded — thum.io appends it directly after the path
-  const screenshotApiUrl = `https://image.thum.io/get/fullpage/width/1440/noanimate/${url}`;
+  // microlink.io API:
+  //   screenshot=true        → capture screenshot
+  //   meta=false             → skip metadata extraction, just screenshot
+  //   fullPage=true          → scroll and capture entire page height
+  //   viewport.width=1440    → desktop width
+  //   waitFor=3000           → wait 3s for animations/lazy images to load
+  const apiUrl = 'https://api.microlink.io';
+  const params = {
+    url,
+    screenshot: true,
+    meta: false,
+    fullPage: true,
+    'viewport.width': 1440,
+    'viewport.height': 900,
+    waitFor: 3000,
+  };
 
-  const response = await axios.get(screenshotApiUrl, {
+  console.log('⏳ Waiting for microlink.io to render full page...');
+  const apiRes = await axios.get(apiUrl, {
+    params,
+    timeout: 60000,
+    headers: { 'Accept': 'application/json' },
+  });
+
+  const screenshotUrl = apiRes.data?.data?.screenshot?.url;
+  if (!screenshotUrl) {
+    throw new Error(`microlink.io did not return a screenshot URL. Response: ${JSON.stringify(apiRes.data)}`);
+  }
+
+  console.log(`📥 Downloading screenshot from: ${screenshotUrl}`);
+  const imgRes = await axios.get(screenshotUrl, {
     responseType: 'arraybuffer',
     timeout: 30000,
-    headers: { 'Accept': 'image/png,image/jpeg,image/*' },
   });
 
   const screenshotPath = path.join(os.tmpdir(), `preview-${Date.now()}.png`);
-  fs.writeFileSync(screenshotPath, response.data);
+  fs.writeFileSync(screenshotPath, imgRes.data);
 
-  console.log(`✅ Screenshot saved (${response.data.byteLength} bytes): ${screenshotPath}`);
+  console.log(`✅ Screenshot saved (${imgRes.data.byteLength} bytes): ${screenshotPath}`);
   return screenshotPath;
 }
 
