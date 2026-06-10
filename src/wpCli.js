@@ -55,11 +55,12 @@ function disconnect() {
 // Run a WP CLI command via SSH
 async function runWpCli(command) {
   const conn = await connect();
-  const wpPath = `/home/${process.env.WPENGINE_SSH_USER}/sites/${process.env.WPENGINE_SSH_USER}`;
+  // WP Engine SSH path: /home/wpe-user/sites/{install-name}
+  const wpPath = `/home/wpe-user/sites/${process.env.WPENGINE_SSH_USER}`;
   const result = await conn.execCommand(`wp ${command} --path=${wpPath}`, {
     cwd: wpPath
   });
-  if (result.stderr && !result.stderr.includes('Warning')) {
+  if (result.stderr && !result.stderr.includes('Warning') && !result.stderr.includes('Notice')) {
     throw new Error(`WP CLI error: ${result.stderr}`);
   }
   console.log(`✅ WP CLI: wp ${command}`);
