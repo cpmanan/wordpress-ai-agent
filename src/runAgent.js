@@ -483,6 +483,7 @@ Return JSON: {
         await setRevertMeta(issueKey, {
           type: 'nav',
           pageId,
+          menuId:   navPlan.menuId || navPlan.menuName,
           menuName: navPlan.menuName,
           timestamp: new Date().toISOString()
         });
@@ -636,7 +637,19 @@ Return JSON: {
 
       // ── REVERT ──────────────────────────────────────────────────────
       case TASK_TYPES.REVERT: {
-        await revertTask(issueKey);
+        // Support two patterns:
+        // 1. Comment "revert" on the ORIGINAL issue → revert that issue itself
+        // 2. New task with "revert BRIN-XX" in title/description → extract target key
+        const referencedKey = (`${title} ${description}`.match(/\b(BRIN-\d+)\b/i) || [])[1];
+        const targetKey = (referencedKey && referencedKey.toUpperCase() !== issueKey.toUpperCase())
+          ? referencedKey.toUpperCase()
+          : issueKey;
+
+        if (targetKey !== issueKey) {
+          await addComment(issueKey, `🔄 Reverting changes from *${targetKey}*...`);
+        }
+
+        await revertTask(targetKey, issueKey);
         break;
       }
 

@@ -1,14 +1,25 @@
 const { getRevertMeta, addComment, transitionIssue } = require('./jira');
 const { revertToSha } = require('./wpEngineDeploy');
-const { updatePost, updatePage } = require('./wpRest');
+const { updatePost, updatePage, getMenuItems } = require('./wpRest');
 const { importDb, deactivatePlugin, runWpCli } = require('./wpCli');
+const axios = require('axios');
 
-// Execute the correct revert strategy based on stored metadata
-async function revertTask(issueKey) {
-  const meta = await getRevertMeta(issueKey);
+/**
+ * Revert a previously applied change.
+ * @param {string} issueKey     - issue whose revert metadata to look up (e.g. BRIN-35)
+ * @param {string} commentOnKey - issue to post result comments on (defaults to issueKey)
+ *                                Pass this when a NEW task (BRIN-40) reverts an OLD one (BRIN-35)
+ */
+async function revertTask(issueKey, commentOnKey) {
+  const postTo = commentOnKey || issueKey;
+  const meta   = await getRevertMeta(issueKey);
 
   if (!meta) {
-    await addComment(issueKey, '⚠️ No revert data found for this issue. Cannot revert automatically.');
+    await addComment(postTo,
+      `⚠️ No revert data found for *${issueKey}*. Cannot revert automatically.\n\n` +
+      `This happens if the original task was processed before the revert system was added, ` +
+      `or the issue key is incorrect.`
+    );
     return;
   }
 
@@ -16,15 +27,19 @@ async function revertTask(issueKey) {
 
   try {
     switch (type) {
-      // Revert a child theme file change (git SHA rollback)
+
+      // Revert a child theme file change — git SHA rollback + redeploy
       case 'file': {
         const { oldSha } = meta;
         await revertToSha(oldSha);
-        await addComment(issueKey, `✅ Reverted theme files to git SHA ${oldSha.substring(0, 8)} (state from ${timestamp})`);
+        await addComment(postTo,
+          `✅ Reverted *${issueKey}* — theme files rolled back to git SHA \`${oldSha.substring(0, 8)}\`\n` +
+          `Original state from: ${timestamp}`
+        );
         break;
       }
 
-      // Revert a post content change (restore saved JSON)
+      // Revert a post/page content change — restore saved HTML
       case 'content': {
         const { postId, postType, savedContent } = meta;
         if (postType === 'page') {
@@ -32,15 +47,18 @@ async function revertTask(issueKey) {
         } else {
           await updatePost(postId, { title: savedContent.title, content: savedContent.content });
         }
-        await addComment(issueKey, `✅ Reverted ${postType} #${postId} to previous content (state from ${timestamp})`);
+        await addComment(postTo,
+          `✅ Reverted *${issueKey}* — ${postType} #${postId} restored to original content\n` +
+          `Original state from: ${timestamp}`
+        );
         break;
       }
 
-      // DB revert (WP CLI / Yoast / Elementor) — via SSH
+      // DB revert (Yoast SEO) — restore from WP CLI export
       case 'db': {
         const { backupFile } = meta;
         await importDb(backupFile);
-        await addComment(issueKey, `✅ Reverted database from backup (state from ${timestamp})`);
+        await addComment(postTo, `✅ Reverted *${issueKey}* — database restored from backup (${timestamp})`);
         break;
       }
 
@@ -49,39 +67,47 @@ async function revertTask(issueKey) {
         const { pluginSlug } = meta;
         await deactivatePlugin(pluginSlug);
         await runWpCli(`plugin uninstall ${pluginSlug}`);
-        await addComment(issueKey, `✅ Plugin "${pluginSlug}" deactivated and removed (state from ${timestamp})`);
-        await transitionIssue(issueKey, 'Done').catch(() => {});
+        await addComment(postTo, `✅ Reverted *${issueKey}* — plugin "${pluginSlug}" deactivated and removed`);
+        await transitionIssue(postTo, 'Done').catch(() => {});
         break;
       }
 
-      // Nav revert — remove menu item (page stays)
+      // Nav revert — remove menu item via REST API (no SSH needed)
       case 'nav': {
-        const { pageId, menuName } = meta;
-        const { getMenuItems } = require('./wpCli');
-        const items = await getMenuItems(menuName);
-        const item = items.find(i => i.object_id == pageId);
+        const { pageId, menuId } = meta;
+        const BASE_URL = process.env.WP_STAGING_URL;
+        const auth = { username: process.env.WP_USERNAME, password: process.env.WP_APP_PASSWORD };
+
+        const items = await getMenuItems(menuId);
+        const item  = items.find(i => i.object_id == pageId);
         if (item) {
-          await runWpCli(`menu item delete ${item.db_id}`);
+          await axios.delete(`${BASE_URL}/wp-json/wp/v2/menu-items/${item.id}`, {
+            auth,
+            params: { force: true }
+          });
+          console.log(`✅ Deleted menu item ${item.id} for page ${pageId}`);
+        } else {
+          console.warn(`⚠️  Menu item for page ${pageId} not found — may already be removed`);
         }
-        await addComment(issueKey, `✅ Removed page from navigation menu "${menuName}" (state from ${timestamp})`);
-        await transitionIssue(issueKey, 'Done').catch(() => {});
+        await addComment(postTo, `✅ Reverted *${issueKey}* — page removed from navigation menu`);
+        await transitionIssue(postTo, 'Done').catch(() => {});
         break;
       }
 
-      // WP Engine full backup restore (plugin/core updates)
+      // WP Engine full backup restore
       case 'backup': {
         const { backupId } = meta;
         const { restoreBackup } = require('./wpEngineBackup');
         await restoreBackup(backupId);
-        await addComment(issueKey, `✅ Restored WP Engine backup ${backupId} (state from ${timestamp})`);
+        await addComment(postTo, `✅ Reverted *${issueKey}* — WP Engine backup ${backupId} restored`);
         break;
       }
 
       default:
-        await addComment(issueKey, `⚠️ Unknown revert type "${type}". Please revert manually.`);
+        await addComment(postTo, `⚠️ Unknown revert type "${type}" on *${issueKey}*. Please revert manually.`);
     }
   } catch (err) {
-    await addComment(issueKey, `❌ Revert failed: ${err.message}`);
+    await addComment(postTo, `❌ Revert of *${issueKey}* failed: ${err.message}`);
     throw err;
   }
 }
