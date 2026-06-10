@@ -935,14 +935,187 @@ add_action('rest_api_init', function() {
         break;
       }
 
-      // ── ELEMENTOR: Not yet supported ─────────────────────────────────
+      // ── ELEMENTOR: Edit Elementor page builder content ───────────────
       case TASK_TYPES.ELEMENTOR: {
-        await addComment(issueKey,
-          `⚠️ Elementor page builder editing is coming in Phase 3.\n\n` +
-          `For now, please edit this manually in WP Admin → Elementor editor.\n` +
-          `Or rephrase the task as a plain content/CSS change.`
-        );
+        const axios  = require('axios');
+        const WP_BASE = process.env.WP_STAGING_URL;
+        const wpAuth  = { username: process.env.WP_USERNAME, password: process.env.WP_APP_PASSWORD };
+
+        // 1. Find the target page — explicit page ID in description takes priority
+        const elemIdMatch = (description).match(/page\s+id[:\s]+(\d+)/i);
+        let elemPage = null;
+        if (elemIdMatch) {
+          elemPage = await getPage(parseInt(elemIdMatch[1]));
+        } else {
+          // Try slug/title search
+          const slugMatch = (title + ' ' + description).toLowerCase()
+            .match(/\b(contact|about|services|classes|home|faq|gallery|team|booking|schedule)\b/);
+          if (slugMatch) elemPage = await getPageBySlug(slugMatch[0]);
+          if (!elemPage) {
+            const results = await findPageByTitle(title.replace(/phase \d+\s*test \d+\s*:?\s*/i, '').trim());
+            elemPage = results[0] || null;
+          }
+        }
+
+        if (!elemPage) {
+          await addComment(issueKey, `⚠️ Could not find the Elementor page. Please include the page ID in the task description (e.g. "page ID: 2360").`);
+          await transitionIssue(issueKey, 'In Review');
+          break;
+        }
+
+        // 2. Ensure the custom Elementor endpoint is deployed in functions.php
+        const ELEMENTOR_ENDPOINT_MARKER = '// brinda-agent: Elementor endpoint v1';
+        const elementorEndpointPhp = `
+
+${ELEMENTOR_ENDPOINT_MARKER}
+add_action('rest_api_init', function() {
+    register_rest_route('brinda-agent/v1', '/elementor-data', [
+        'methods'             => ['GET', 'POST'],
+        'permission_callback' => function() { return current_user_can('edit_posts'); },
+        'callback'            => function(WP_REST_Request $req) {
+            $post_id = intval($req->get_param('post_id'));
+            if (!$post_id) return new WP_Error('invalid', 'post_id required', ['status' => 400]);
+            if ($req->get_method() === 'GET') {
+                return [
+                    'post_id'        => $post_id,
+                    'elementor_data' => get_post_meta($post_id, '_elementor_data', true),
+                    'edit_mode'      => get_post_meta($post_id, '_elementor_edit_mode', true),
+                ];
+            }
+            // POST: write new elementor data
+            $data = $req->get_param('elementor_data');
+            if ($data !== null) {
+                update_post_meta($post_id, '_elementor_data', wp_slash($data));
+                // Clear Elementor CSS cache
+                delete_post_meta($post_id, '_elementor_css');
+                delete_post_meta($post_id, '_elementor_element_cache');
+            }
+            return ['success' => true, 'post_id' => $post_id];
+        },
+    ]);
+});
+`;
+
+        // Deploy endpoint if not already in functions.php
+        const { cloneDir: elCloneDir } = await cloneRepo();
+        try {
+          const currentFunctions = readFile(elCloneDir, 'functions.php') || '';
+          if (!currentFunctions.includes(ELEMENTOR_ENDPOINT_MARKER)) {
+            editFile(elCloneDir, 'functions.php', currentFunctions.trimEnd() + '\n' + elementorEndpointPhp);
+            const { sha, noChanges } = await commitAndDeploy(elCloneDir, '[AI Agent] Add brinda-agent Elementor REST endpoint');
+            if (!noChanges) {
+              await addComment(issueKey, `⚙️ Deploying Elementor endpoint — waiting for pipeline...`);
+              await pollPipelineUntilDone(sha);
+              await purgeCache();
+              await new Promise(r => setTimeout(r, 5000));
+            }
+          }
+        } finally {
+          cleanup(elCloneDir);
+        }
+
+        // 3. Read current Elementor data via the custom endpoint
+        let elementorData = null;
+        try {
+          const getRes = await axios.get(`${WP_BASE}/wp-json/brinda-agent/v1/elementor-data`, {
+            auth: wpAuth, params: { post_id: elemPage.id }
+          });
+          elementorData = getRes.data?.elementor_data;
+          console.log(`✅ Read Elementor data for page ${elemPage.id} (${typeof elementorData === 'string' ? elementorData.length : 0} chars)`);
+        } catch (e) {
+          throw new Error(`Could not read Elementor data: ${e.response?.data?.message || e.message}`);
+        }
+
+        if (!elementorData || elementorData === '') {
+          await addComment(issueKey,
+            `⚠️ Page "${elemPage.title?.rendered}" (ID: ${elemPage.id}) has no Elementor data.\n\n` +
+            `This page may not be built with Elementor, or the editor hasn't been opened yet.`
+          );
+          await transitionIssue(issueKey, 'In Review');
+          break;
+        }
+
+        // 4. Save original data for revert
+        await setRevertMeta(issueKey, {
+          type: 'elementor',
+          pageId: elemPage.id,
+          savedElementorData: elementorData,
+          timestamp: new Date().toISOString()
+        });
+
+        // 5. Ask GPT to modify the Elementor JSON
+        const elemResponse = await getOpenAI().chat.completions.create({
+          model: 'gpt-4o',
+          messages: [
+            {
+              role: 'system',
+              content: `You are an Elementor page builder editor. You will receive Elementor JSON data (_elementor_data) and a task describing what to change.
+
+Your job:
+1. Parse the Elementor JSON (array of sections/columns/widgets)
+2. Find the specific widget(s) matching the task description
+3. Make ONLY the requested text/content change — do NOT change any styles, settings, or other widgets
+4. Return the complete modified JSON
+
+Elementor widget types to look for:
+- "heading" widgets: text is in settings.title
+- "text-editor" widgets: text is in settings.editor
+- "button" widgets: text is in settings.text
+- "image" widgets: alt text in settings.image.alt
+
+Return JSON: {
+  "elementor_data": "<complete modified JSON string>",
+  "changed": true or false,
+  "widget_type": "the widget type you changed",
+  "what_changed": "brief description"
+}`
+            },
+            {
+              role: 'user',
+              content: `Task: ${title}\n\nDetails: ${description}\n\nPage: "${elemPage.title?.rendered}" (ID: ${elemPage.id})\n\nElementor data:\n${typeof elementorData === 'string' ? elementorData.substring(0, 8000) : JSON.stringify(elementorData).substring(0, 8000)}`
+            }
+          ],
+          response_format: { type: 'json_object' }
+        });
+
+        const elemResult = JSON.parse(elemResponse.choices[0].message.content);
+
+        if (!elemResult.changed) {
+          await addComment(issueKey,
+            `⚠️ Could not find the widget to change in the Elementor data.\n\n` +
+            `Please be more specific about which section or text to update.\n` +
+            `Page: [${elemPage.title?.rendered}|${WP_BASE}/wp-admin/post.php?post=${elemPage.id}&action=elementor]`
+          );
+          await transitionIssue(issueKey, 'In Review');
+          break;
+        }
+
+        // 6. Write updated Elementor data back
+        await axios.post(`${WP_BASE}/wp-json/brinda-agent/v1/elementor-data`, {
+          post_id:       elemPage.id,
+          elementor_data: elemResult.elementor_data,
+        }, { auth: wpAuth });
+
+        console.log(`✅ Elementor data updated for page ${elemPage.id}: ${elemResult.what_changed}`);
+
         await transitionIssue(issueKey, 'In Review');
+        await purgeCache();
+
+        const elemPageUrl = elemPage.link || `${WP_BASE}/?page_id=${elemPage.id}`;
+        const elemScreenshot = await capturePreview(issueKey, elemPageUrl);
+        const elemScreenshotLine = elemScreenshot ? `\n\n📸 *Updated page screenshot:*\n!${elemScreenshot}!` : '';
+
+        await addComment(issueKey,
+          `✅ Elementor page updated: *"${elemPage.title?.rendered}"*\n\n` +
+          `*Changed:* ${elemResult.what_changed}\n` +
+          `*Widget type:* ${elemResult.widget_type}\n\n` +
+          `🔗 [View page|${elemPageUrl}] | [Edit in Elementor|${WP_BASE}/wp-admin/post.php?post=${elemPage.id}&action=elementor]` +
+          elemScreenshotLine + `\n\n` +
+          `──────────────────────\n` +
+          `💬 Commands:\n` +
+          `• \`redo: <feedback>\` — adjust the change\n` +
+          `• \`revert\` — restore original Elementor layout`
+        );
         break;
       }
 

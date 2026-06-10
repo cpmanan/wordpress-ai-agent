@@ -54,6 +54,22 @@ async function revertTask(issueKey, commentOnKey) {
         break;
       }
 
+      // Elementor revert — restore _elementor_data to saved state
+      case 'elementor': {
+        const { pageId, savedElementorData } = meta;
+        const axiosLib = require('axios');
+        const WP_BASE  = process.env.WP_STAGING_URL;
+        const wpAuth   = { username: process.env.WP_USERNAME, password: process.env.WP_APP_PASSWORD };
+        await axiosLib.post(
+          `${WP_BASE}/wp-json/brinda-agent/v1/elementor-data`,
+          { post_id: pageId, elementor_data: savedElementorData },
+          { auth: wpAuth }
+        );
+        await addComment(postTo, `✅ Reverted *${issueKey}* — Elementor layout restored to original state`);
+        await transitionIssue(postTo, 'Done').catch(() => {});
+        break;
+      }
+
       // SEO revert — restore previous Yoast meta via REST API
       case 'seo': {
         const { pageId, savedSeoMeta } = meta;
