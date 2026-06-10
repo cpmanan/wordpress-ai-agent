@@ -11,18 +11,31 @@ const TASK_TYPES = {
 
 const FILE_KEYWORDS = [
   'css', 'style', 'color', 'colour', 'font', 'layout', 'background', 'padding',
-  'margin', 'php', 'template', 'header', 'footer', 'theme', 'design', 'spacing',
+  'margin', 'php', 'template', 'theme', 'design', 'spacing',
   'border', 'responsive', 'mobile', 'hero section', 'button', 'hover', 'shadow',
-  'typography', 'heading', 'width', 'height', 'opacity', 'animation', 'transition',
-  'change theme', 'edit theme', 'update theme', 'modify theme'
+  'typography', 'heading style', 'heading color', 'heading font',
+  'width', 'height', 'opacity', 'animation', 'transition',
+  'change theme', 'edit theme', 'update theme', 'modify theme',
+  'header style', 'footer style',
+  // explicit CSS/PHP file markers
+  'style.css', 'functions.php', 'child theme'
 ];
 
 const CONTENT_KEYWORDS = [
-  'create post', 'write post', 'new post', 'blog post', 'create page', 'new page',
-  'add page', 'write page', 'create content', 'publish', 'address', 'phone',
-  'email address', 'contact info', 'update text', 'change text', 'edit text',
-  'add text', 'page content', 'update content', 'change content', 'page address',
-  'update the', 'change the', 'edit the', 'modify the'
+  // Post/page creation
+  'create post', 'write post', 'new post', 'blog post', 'article',
+  'create page', 'new page', 'add page', 'write page',
+  // Content editing
+  'create content', 'publish', 'update text', 'change text', 'edit text',
+  'add text', 'page content', 'update content', 'change content',
+  'update the', 'change the', 'edit the', 'modify the',
+  // Page-specific text fields
+  'page heading', 'page title', 'heading text', 'section heading',
+  'update heading', 'change heading', 'edit heading',
+  // Contact info
+  'address', 'phone', 'email address', 'contact info', 'page address',
+  // About / specific pages
+  'about us', 'about page', 'contact page', 'services page', 'home page content'
 ];
 
 const NAV_KEYWORDS = [
@@ -63,18 +76,21 @@ function detectTaskType(title, description = '') {
   if (BACKUP_KEYWORDS.some(k => text.includes(k)))    return TASK_TYPES.BACKUP;
   if (PLUGIN_KEYWORDS.some(k => text.includes(k)))    return TASK_TYPES.PLUGIN;
 
+  // Nav before content — "create page and add to nav" should be NAV
+  if (NAV_KEYWORDS.some(k => text.includes(k)))       return TASK_TYPES.NAV;
+
+  if (SEO_KEYWORDS.some(k => text.includes(k)))       return TASK_TYPES.SEO;
+
+  // CONTENT before FILE — "update heading / change text on page" is content, not CSS
+  // FILE keywords are now specific enough (e.g. "heading color" not just "heading")
+  if (CONTENT_KEYWORDS.some(k => text.includes(k)))   return TASK_TYPES.CONTENT;
+
   // FILE takes priority over ELEMENTOR — CSS/PHP tasks that mention elementor
   // selectors (e.g. ".elementor-button") should still be FILE tasks
   if (FILE_KEYWORDS.some(k => text.includes(k)))      return TASK_TYPES.FILE;
 
   // Only route to ELEMENTOR if no FILE keywords matched
   if (ELEMENTOR_KEYWORDS.some(k => text.includes(k))) return TASK_TYPES.ELEMENTOR;
-
-  // Nav before content — "create page and add to nav" should be NAV
-  if (NAV_KEYWORDS.some(k => text.includes(k)))       return TASK_TYPES.NAV;
-
-  if (SEO_KEYWORDS.some(k => text.includes(k)))       return TASK_TYPES.SEO;
-  if (CONTENT_KEYWORDS.some(k => text.includes(k)))   return TASK_TYPES.CONTENT;
 
   return TASK_TYPES.CONTENT; // default
 }
