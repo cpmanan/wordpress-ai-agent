@@ -3,6 +3,7 @@ const { detectTaskType, TASK_TYPES } = require('./taskRouter');
 const { getIssue, addComment, setRevertMeta, transitionIssue, getRevertMeta } = require('./jira');
 const { cloneRepo, getCurrentSha, readFile, readAgentContext, editFile, commitAndDeploy, purgeCache, cleanup } = require('./wpEngineDeploy');
 const { getParentThemeContext } = require('./viharaContext');
+const { capturePreview } = require('./screenshotter');
 const { createPost, updatePost, getPost, createPage, updatePage, getPage, searchContent, getPageBySlug, findPageByTitle } = require('./wpRest');
 const { revertTask } = require('./revert');
 const { getMenus, addPageToMenu, addUrlToMenu, getPlugins, installPlugin, deactivatePlugin, updateYoastSeo, exportDb } = require('./wpCli');
@@ -147,11 +148,20 @@ Return JSON exactly like this:
 
           await transitionIssue(issueKey, 'In Review');
 
+          // Wait ~60s for Bitbucket Pipeline to deploy, then take screenshot
+          console.log('⏳ Waiting 60s for pipeline to deploy before screenshot...');
+          await new Promise(r => setTimeout(r, 60000));
+          const screenshotUrl = await capturePreview(issueKey);
+
+          const screenshotLine = screenshotUrl
+            ? `\n📸 [Preview Screenshot|${screenshotUrl}]`
+            : '';
+
           await addComment(issueKey,
-            `✅ Theme updated — deploying to staging via Bitbucket Pipeline.\n\n` +
+            `✅ Theme updated — deployed to staging.\n\n` +
             `Changed: ${aiResult.summary || fileChanges.map(f => f.file).join(', ')}\n` +
             `Files: ${fileChanges.map(f => f.file).join(', ')}\n` +
-            `Preview: ${process.env.WP_STAGING_URL} *(live in ~1 min after pipeline runs)*\n\n` +
+            `Preview: ${process.env.WP_STAGING_URL}${screenshotLine}\n\n` +
             `──────────────────────\n` +
             `💬 Commands:\n` +
             `• Drag to *Deployment* to mark as approved\n` +
