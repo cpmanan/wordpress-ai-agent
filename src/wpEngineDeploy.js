@@ -55,16 +55,22 @@ async function getCurrentSha(cloneDir) {
   return log.latest.hash;
 }
 
+// Base path inside the cloned repo where theme files live
+// Repo structure: wp-content/themes/<THEME_NAME>/style.css etc.
+function themeDir(cloneDir) {
+  return path.join(cloneDir, 'wp-content', 'themes', THEME_NAME);
+}
+
 // Read a file from the cloned theme
 function readFile(cloneDir, relativePath) {
-  const filePath = path.join(cloneDir, relativePath);
+  const filePath = path.join(themeDir(cloneDir), relativePath);
   if (!fs.existsSync(filePath)) return null;
   return fs.readFileSync(filePath, 'utf8');
 }
 
 // Read the agent context reference file from the child theme repo
 function readAgentContext(cloneDir) {
-  const contextPath = path.join(cloneDir, '_agent-context.md');
+  const contextPath = path.join(themeDir(cloneDir), '_agent-context.md');
   if (!fs.existsSync(contextPath)) {
     console.warn('⚠️  _agent-context.md not found in child theme repo');
     return '';
@@ -77,7 +83,7 @@ function readAgentContext(cloneDir) {
 function editFile(cloneDir, relativePath, newContent) {
   const fullRelative = `wp-content/themes/${THEME_NAME}/${relativePath}`;
   validatePath(fullRelative);
-  const filePath = path.join(cloneDir, relativePath);
+  const filePath = path.join(themeDir(cloneDir), relativePath);
   // Ensure directory exists
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, newContent, 'utf8');
