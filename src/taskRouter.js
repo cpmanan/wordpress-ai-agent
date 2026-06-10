@@ -62,15 +62,18 @@ function detectTaskType(title, description = '') {
   // Check most specific first
   if (BACKUP_KEYWORDS.some(k => text.includes(k)))    return TASK_TYPES.BACKUP;
   if (PLUGIN_KEYWORDS.some(k => text.includes(k)))    return TASK_TYPES.PLUGIN;
+
+  // FILE takes priority over ELEMENTOR — CSS/PHP tasks that mention elementor
+  // selectors (e.g. ".elementor-button") should still be FILE tasks
+  if (FILE_KEYWORDS.some(k => text.includes(k)))      return TASK_TYPES.FILE;
+
+  // Only route to ELEMENTOR if no FILE keywords matched
   if (ELEMENTOR_KEYWORDS.some(k => text.includes(k))) return TASK_TYPES.ELEMENTOR;
 
   // Nav before content — "create page and add to nav" should be NAV
   if (NAV_KEYWORDS.some(k => text.includes(k)))       return TASK_TYPES.NAV;
 
   if (SEO_KEYWORDS.some(k => text.includes(k)))       return TASK_TYPES.SEO;
-
-  // File before content — CSS/PHP edits
-  if (FILE_KEYWORDS.some(k => text.includes(k)))      return TASK_TYPES.FILE;
   if (CONTENT_KEYWORDS.some(k => text.includes(k)))   return TASK_TYPES.CONTENT;
 
   return TASK_TYPES.CONTENT; // default
