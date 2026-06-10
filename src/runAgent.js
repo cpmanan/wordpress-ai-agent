@@ -106,13 +106,13 @@ Return JSON exactly like this:
           }
 
           // Commit → push to Bitbucket → push to WP Engine
-          const newSha = await commitAndDeploy(
+          const { sha: newSha, wpeDeployed } = await commitAndDeploy(
             cloneDir,
             `[AI Agent] ${title} (${issueKey})`
           );
 
-          // Purge cache
-          await purgeCache();
+          // Purge WP Engine cache (only if deploy succeeded)
+          if (wpeDeployed) await purgeCache();
 
           // Store revert metadata
           await setRevertMeta(issueKey, {
@@ -124,17 +124,34 @@ Return JSON exactly like this:
           });
 
           await transitionIssue(issueKey, 'In Review');
-          await addComment(issueKey,
-            `✅ Theme updated and deployed to staging.\n\n` +
-            `Changed: ${aiResult.summary || fileChanges.map(f => f.file).join(', ')}\n` +
-            `Files: ${fileChanges.map(f => f.file).join(', ')}\n` +
-            `Preview: ${process.env.WP_STAGING_URL}\n\n` +
-            `──────────────────────\n` +
-            `💬 Commands:\n` +
-            `• Drag to *Deployment* to mark as approved\n` +
-            `• \`redo: <feedback>\` — request a change\n` +
-            `• \`revert\` — undo this change`
-          );
+
+          if (wpeDeployed) {
+            await addComment(issueKey,
+              `✅ Theme updated and deployed to staging.\n\n` +
+              `Changed: ${aiResult.summary || fileChanges.map(f => f.file).join(', ')}\n` +
+              `Files: ${fileChanges.map(f => f.file).join(', ')}\n` +
+              `Preview: ${process.env.WP_STAGING_URL}\n\n` +
+              `──────────────────────\n` +
+              `💬 Commands:\n` +
+              `• Drag to *Deployment* to mark as approved\n` +
+              `• \`redo: <feedback>\` — request a change\n` +
+              `• \`revert\` — undo this change`
+            );
+          } else {
+            await addComment(issueKey,
+              `⚠️ Theme files updated in Bitbucket but WP Engine deploy failed (SSH issue).\n\n` +
+              `Changed: ${aiResult.summary || fileChanges.map(f => f.file).join(', ')}\n` +
+              `Files: ${fileChanges.map(f => f.file).join(', ')}\n\n` +
+              `To deploy manually:\n` +
+              `1. Go to WP Engine → Installs → brindayogacstg → Git Push\n` +
+              `2. Or ask your developer to run: \`git push wpengine master\`\n\n` +
+              `To fix SSH: Go to *https://my.wpengine.com/ssh_keys* and verify the Railway Agent key is listed.\n\n` +
+              `──────────────────────\n` +
+              `💬 Commands:\n` +
+              `• \`redo: <feedback>\` — request a change\n` +
+              `• \`revert\` — undo this change`
+            );
+          }
         } finally {
           cleanup(cloneDir);
         }

@@ -96,12 +96,21 @@ async function commitAndDeploy(cloneDir, commitMessage) {
   console.log(`✅ Pushed to Bitbucket`);
 
   // Push to WP Engine via SSH (GIT_SSH_COMMAND already set)
-  await git.addRemote('wpengine', WPE_REMOTE).catch(() => {});
-  await git.push('wpengine', `HEAD:master`);
-  console.log(`✅ Pushed to WP Engine staging`);
+  // Non-fatal: Bitbucket is the source of truth. WP Engine push is the deploy step.
+  let wpeDeployed = false;
+  try {
+    await git.addRemote('wpengine', WPE_REMOTE).catch(() => {});
+    await git.push('wpengine', `HEAD:master`);
+    console.log(`✅ Pushed to WP Engine staging`);
+    wpeDeployed = true;
+  } catch (sshErr) {
+    console.warn(`⚠️  WP Engine git push failed (SSH): ${sshErr.message}`);
+    console.warn(`   Changes saved to Bitbucket. Manual deploy may be needed.`);
+  }
 
   const log = await git.log(['-1']);
-  return log.latest.hash;
+  const sha = log.latest.hash;
+  return { sha, wpeDeployed };
 }
 
 // Purge WP Engine cache after deploy
@@ -123,10 +132,16 @@ async function revertToSha(oldSha) {
   setupSshKey();
   const { cloneDir } = await cloneRepo();
   const git = simpleGit({ baseDir: cloneDir });
-  await git.addRemote('wpengine', WPE_REMOTE).catch(() => {});
-  await git.push('wpengine', `${oldSha}:master`, ['--force']);
-  await purgeCache();
-  cleanup(cloneDir);
+  try {
+    await git.addRemote('wpengine', WPE_REMOTE).catch(() => {});
+    await git.push('wpengine', `${oldSha}:master`, ['--force']);
+    await purgeCache();
+  } catch (sshErr) {
+    console.warn(`⚠️  WP Engine revert push failed (SSH): ${sshErr.message}`);
+    throw new Error(`Revert to Bitbucket succeeded but WP Engine deploy failed: ${sshErr.message}`);
+  } finally {
+    cleanup(cloneDir);
+  }
 }
 
 // Remove temp clone directory
