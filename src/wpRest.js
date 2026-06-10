@@ -28,10 +28,10 @@ async function searchContent(query) {
 }
 
 // Create a new post
-async function createPost(title, content, status = 'draft') {
+async function createPost(title, content, status = 'draft', excerpt = '') {
   const res = await axios.post(
     `${BASE_URL}/wp-json/wp/v2/posts`,
-    { title, content, status },
+    { title, content, status, excerpt },
     { auth }
   );
   return res.data;

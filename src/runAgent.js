@@ -1,7 +1,7 @@
 const OpenAI = require('openai');
 const { detectTaskType, TASK_TYPES } = require('./taskRouter');
 const { getIssue, addComment, setRevertMeta, transitionIssue, getRevertMeta } = require('./jira');
-const { cloneRepo, getCurrentSha, readFile, editFile, commitAndDeploy, cleanup } = require('./wpEngineDeploy');
+const { cloneRepo, getCurrentSha, readFile, editFile, commitAndDeploy, purgeCache, cleanup } = require('./wpEngineDeploy');
 const { createPost, updatePost, getPost, createPage, updatePage, getPage, searchContent, getPageBySlug, findPageByTitle } = require('./wpRest');
 const { revertTask } = require('./revert');
 const { getMenus, addPageToMenu, addUrlToMenu, getPlugins, installPlugin, deactivatePlugin, updateYoastSeo, exportDb } = require('./wpCli');
@@ -13,7 +13,7 @@ function getOpenAI() {
   return openai;
 }
 
-async function runAgent(issueKey) {
+async function runAgent(issueKey, feedbackContext = null) {
   console.log(`\n🤖 Processing Jira issue: ${issueKey}`);
 
   // 1. Fetch issue details
@@ -38,12 +38,15 @@ async function runAgent(issueKey) {
 
       // ── FILE: Edit child theme CSS/PHP ──────────────────────────────
       case TASK_TYPES.FILE: {
-        const { cloneDir, keyPath } = await cloneRepo();
+        const { cloneDir } = await cloneRepo();
 
         try {
-          // Read current style.css as context
-          const currentCss = readFile(cloneDir, 'style.css');
-          const currentFunctions = readFile(cloneDir, 'functions.php').catch(() => '');
+          // Read current theme files — readFile returns null if file doesn't exist
+          const currentCss       = readFile(cloneDir, 'style.css') || '/* style.css is empty */';
+          const currentFunctions = readFile(cloneDir, 'functions.php') || '<?php // functions.php is empty';
+
+          // Get SHA before changes (for revert)
+          const oldSha = await getCurrentSha(cloneDir);
 
           // Ask OpenAI what to change
           const aiResponse = await getOpenAI().chat.completions.create({
@@ -51,52 +54,86 @@ async function runAgent(issueKey) {
             messages: [
               {
                 role: 'system',
-                content: `You are a WordPress child theme developer. You will be given a task and the current theme files.
-                Return a JSON object with the files to modify: { "file": "filename", "content": "full new file content" }[]
-                Only modify files inside the child theme. Never touch parent theme or core files.`
+                content: `You are a WordPress child theme developer for Brinda Yoga website.
+You will receive a task and the current child theme files.
+Make ONLY the specific change requested — do not rewrite unrelated styles.
+
+RULES:
+1. Only edit files that need changing for this task
+2. Return complete file content (not just the diff)
+3. Only touch: style.css, functions.php, or custom PHP template files
+4. Never modify parent theme files
+
+Return JSON exactly like this:
+{
+  "files": [
+    { "file": "style.css", "content": "/* full updated content */" },
+    { "file": "functions.php", "content": "<?php // full updated content" }
+  ],
+  "summary": "brief description of what was changed"
+}`
               },
               {
                 role: 'user',
-                content: `Task: ${title}\n\nDescription: ${description}\n\nCurrent style.css:\n${currentCss}\n\nCurrent functions.php:\n${currentFunctions}`
+                content: `Task: ${title}\n\nDetails: ${description}${feedbackContext ? `\n\nPrevious attempt feedback: ${feedbackContext}` : ''}\n\nCurrent style.css:\n${currentCss}\n\nCurrent functions.php:\n${currentFunctions}`
               }
             ],
             response_format: { type: 'json_object' }
           });
 
-          const changes = JSON.parse(aiResponse.choices[0].message.content);
-          const fileChanges = Array.isArray(changes.files) ? changes.files : [changes];
+          const aiResult = JSON.parse(aiResponse.choices[0].message.content);
 
-          // Get current SHA before making changes (for revert)
-          const oldSha = await getCurrentSha(cloneDir);
+          // Normalize — handle both {files:[]} and {file, content} shapes
+          let fileChanges = [];
+          if (Array.isArray(aiResult.files)) {
+            fileChanges = aiResult.files;
+          } else if (aiResult.file && aiResult.content) {
+            fileChanges = [{ file: aiResult.file, content: aiResult.content }];
+          } else {
+            // Fallback: find any key that looks like a filename
+            fileChanges = Object.entries(aiResult)
+              .filter(([k]) => k.endsWith('.css') || k.endsWith('.php'))
+              .map(([file, content]) => ({ file, content }));
+          }
+
+          if (fileChanges.length === 0) {
+            throw new Error('OpenAI did not return any file changes. Try rephrasing the task.');
+          }
 
           // Apply changes
           for (const change of fileChanges) {
             editFile(cloneDir, change.file, change.content);
-            console.log(`✏️  Edited: ${change.file}`);
           }
 
-          // Commit and deploy to staging
-          const newSha = await commitAndDeploy(cloneDir, keyPath, `[AI Agent] ${title} (BRIN: ${issueKey})`);
+          // Commit → push to Bitbucket → push to WP Engine
+          const newSha = await commitAndDeploy(
+            cloneDir,
+            `[AI Agent] ${title} (${issueKey})`
+          );
+
+          // Purge cache
+          await purgeCache();
 
           // Store revert metadata
           await setRevertMeta(issueKey, {
             type: 'file',
             oldSha,
             newSha,
-            timestamp: new Date().toISOString(),
-            filesChanged: fileChanges.map(f => f.file)
+            filesChanged: fileChanges.map(f => f.file),
+            timestamp: new Date().toISOString()
           });
 
           await transitionIssue(issueKey, 'In Review');
           await addComment(issueKey,
-            `✅ Theme files updated and deployed to staging.\n\n` +
-            `Files changed: ${fileChanges.map(f => f.file).join(', ')}\n` +
-            `Staging URL: ${process.env.WP_STAGING_URL}\n\n` +
+            `✅ Theme updated and deployed to staging.\n\n` +
+            `Changed: ${aiResult.summary || fileChanges.map(f => f.file).join(', ')}\n` +
+            `Files: ${fileChanges.map(f => f.file).join(', ')}\n` +
+            `Preview: ${process.env.WP_STAGING_URL}\n\n` +
             `──────────────────────\n` +
-            `💬 Available commands (add as a comment):\n` +
-            `• \`approve\` — mark this change as approved and close the issue\n` +
-            `• \`revert\` — undo this change completely\n` +
-            `• \`run\` — re-run the agent on this issue`
+            `💬 Commands:\n` +
+            `• Drag to *Deployment* to mark as approved\n` +
+            `• \`redo: <feedback>\` — request a change\n` +
+            `• \`revert\` — undo this change`
           );
         } finally {
           cleanup(cloneDir);
@@ -112,34 +149,40 @@ async function runAgent(issueKey) {
         const slugHints = title.toLowerCase().match(/\b(contact|about|services|home|pricing|blog|faq|gallery|team|booking|schedule|classes|yoga|meditation)\b/g) || [];
         const titleWords = title.replace(/[^a-z0-9 ]/gi, ' ').split(' ').filter(w => w.length > 3);
 
+        // Detect if this is a blog post vs page
+        const isBlogPost = /\b(blog post|article|news|post)\b/i.test(title + ' ' + description);
+        console.log(`📝 Content type: ${isBlogPost ? 'blog post' : 'page'}`);
+
         let existingPage = null;
 
-        // Try slug match first (most accurate)
-        for (const slug of slugHints) {
-          existingPage = await getPageBySlug(slug);
-          if (existingPage) break;
-        }
+        if (!isBlogPost) {
+          // Try slug match first (most accurate)
+          for (const slug of slugHints) {
+            existingPage = await getPageBySlug(slug);
+            if (existingPage) break;
+          }
 
-        // Fall back to title search
-        if (!existingPage) {
-          const searchResults = await findPageByTitle(slugHints[0] || titleWords[0] || title);
-          if (searchResults.length > 0) existingPage = searchResults[0];
-        }
+          // Fall back to title search
+          if (!existingPage) {
+            const searchResults = await findPageByTitle(slugHints[0] || titleWords[0] || title);
+            if (searchResults.length > 0) existingPage = searchResults[0];
+          }
 
-        // Also try general search
-        if (!existingPage) {
-          const generalSearch = await searchContent(title);
-          if (generalSearch.length > 0) {
-            const pageResult = generalSearch.find(r => r.subtype === 'page');
-            if (pageResult) {
-              existingPage = await getPage(pageResult.id);
+          // Also try general search
+          if (!existingPage) {
+            const generalSearch = await searchContent(title);
+            if (generalSearch.length > 0) {
+              const pageResult = generalSearch.find(r => r.subtype === 'page');
+              if (pageResult) {
+                existingPage = await getPage(pageResult.id);
+              }
             }
           }
         }
 
         let savedContent = null;
         let postId = null;
-        let contentIsPage = true;
+        let contentIsPage = !isBlogPost;
         let action = 'create';
 
         if (existingPage) {
@@ -224,6 +267,33 @@ Return JSON: {
             status: existingPage.status  // keep existing status (published stays published as draft copy)
           });
 
+        } else if (isBlogPost) {
+          // ── CREATE new blog post ──────────────────────────────────
+          contentIsPage = false;
+          action = 'create';
+
+          const aiResponse = await getOpenAI().chat.completions.create({
+            model: 'gpt-4o',
+            messages: [
+              {
+                role: 'system',
+                content: `You are a content writer for Brinda Yoga, a professional yoga studio website.
+Write an engaging, informative blog post that reflects the brand voice of a mindful yoga studio.
+Use well-structured HTML with headings, paragraphs, and lists where appropriate.
+Return JSON: { "title": "blog post title", "content": "full HTML content", "excerpt": "brief summary (1-2 sentences)" }`
+              },
+              {
+                role: 'user',
+                content: `Create a blog post for: ${title}\n\nDetails: ${description}`
+              }
+            ],
+            response_format: { type: 'json_object' }
+          });
+
+          const result = JSON.parse(aiResponse.choices[0].message.content);
+          const created = await createPost(result.title, result.content, 'draft', result.excerpt);
+          postId = created.id;
+
         } else {
           // ── CREATE new page ───────────────────────────────────────
           contentIsPage = true;
@@ -252,10 +322,11 @@ Return JSON: { "title": "page title", "content": "full HTML content" }`
         }
 
         // Store revert metadata
+        const postType = contentIsPage ? 'page' : 'post';
         await setRevertMeta(issueKey, {
           type: 'content',
           postId,
-          postType: 'page',
+          postType,
           savedContent,
           timestamp: new Date().toISOString()
         });
@@ -263,17 +334,20 @@ Return JSON: { "title": "page title", "content": "full HTML content" }`
         // Move to In Review
         await transitionIssue(issueKey, 'In Review');
 
-        const previewUrl = `${process.env.WP_STAGING_URL}/?page_id=${postId}&preview=true`;
+        const previewUrl = contentIsPage
+          ? `${process.env.WP_STAGING_URL}/?page_id=${postId}&preview=true`
+          : `${process.env.WP_STAGING_URL}/?p=${postId}&preview=true`;
 
+        const contentLabel = contentIsPage ? 'Page' : 'Blog post';
         await addComment(issueKey,
-          `✅ Page ${action === 'update' ? 'updated' : 'created'} as draft.\n\n` +
-          `${existingPage ? `Existing page found: "${existingPage.title?.rendered}"` : 'New page created'}\n` +
+          `✅ ${contentLabel} ${action === 'update' ? 'updated' : 'created'} as draft.\n\n` +
+          `${existingPage ? `Page: "${existingPage.title?.rendered}"` : `New ${contentLabel.toLowerCase()} created`}\n` +
           `Preview: ${previewUrl}\n\n` +
           `──────────────────────\n` +
-          `💬 Next steps:\n` +
-          `• Review the preview link above\n` +
-          `• Drag this issue to *Deployment* column to publish live\n` +
-          `• Comment \`revert\` to undo this change`
+          `💬 Commands:\n` +
+          `• Drag to *Deployment* column to publish live\n` +
+          `• \`redo: <feedback>\` — something not right? describe the fix\n` +
+          `• \`revert\` — undo all changes`
         );
         break;
       }
@@ -539,9 +613,28 @@ async function redoTask(issueKey, feedback) {
     // Get revert metadata to find the page/post that was previously edited
     const meta = await getRevertMeta(issueKey);
 
-    if (!meta || meta.type !== 'content') {
+    if (!meta) {
       await addComment(issueKey,
-        `⚠️ Could not find previously edited content to redo.\n` +
+        `⚠️ Could not find previous edit data to redo.\n` +
+        `Please comment \`run\` to start fresh.`
+      );
+      await transitionIssue(issueKey, 'In Review');
+      return;
+    }
+
+    // For FILE type redos — update the issue description and re-run agent
+    if (meta.type === 'file') {
+      const issue = await getIssue(issueKey);
+      const originalTitle = issue.fields.summary;
+      await addComment(issueKey, `🔄 Applying feedback to theme files: "${feedback}"`);
+      // Re-run agent with feedback appended to context
+      await runAgent(issueKey, feedback);
+      return;
+    }
+
+    if (meta.type !== 'content') {
+      await addComment(issueKey,
+        `⚠️ Redo not supported for task type "${meta.type}".\n` +
         `Please comment \`run\` to start fresh.`
       );
       await transitionIssue(issueKey, 'In Review');

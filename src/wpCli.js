@@ -8,7 +8,10 @@ let ssh = null;
 // Setup SSH key file from env var
 function setupSshKey() {
   const keyPath = path.join(os.tmpdir(), 'wpengine_cli_key');
-  fs.writeFileSync(keyPath, process.env.SSH_PRIVATE_KEY + '\n', { mode: 0o600 });
+  const rawKey = process.env.SSH_PRIVATE_KEY || '';
+  // Handle escaped newlines from Railway env vars
+  const key = rawKey.includes('\\n') ? rawKey.replace(/\\n/g, '\n') : rawKey;
+  fs.writeFileSync(keyPath, key + '\n', { mode: 0o600 });
   return keyPath;
 }
 
