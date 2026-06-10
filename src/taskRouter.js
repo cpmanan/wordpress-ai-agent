@@ -81,16 +81,14 @@ function detectTaskType(title, description = '') {
 
   if (SEO_KEYWORDS.some(k => text.includes(k)))       return TASK_TYPES.SEO;
 
+  // ELEMENTOR before CONTENT — "update heading via elementor" is Elementor, not content
+  if (ELEMENTOR_KEYWORDS.some(k => text.includes(k))) return TASK_TYPES.ELEMENTOR;
+
   // CONTENT before FILE — "update heading / change text on page" is content, not CSS
-  // FILE keywords are now specific enough (e.g. "heading color" not just "heading")
   if (CONTENT_KEYWORDS.some(k => text.includes(k)))   return TASK_TYPES.CONTENT;
 
-  // FILE takes priority over ELEMENTOR — CSS/PHP tasks that mention elementor
-  // selectors (e.g. ".elementor-button") should still be FILE tasks
+  // FILE last among content-related types
   if (FILE_KEYWORDS.some(k => text.includes(k)))      return TASK_TYPES.FILE;
-
-  // Only route to ELEMENTOR if no FILE keywords matched
-  if (ELEMENTOR_KEYWORDS.some(k => text.includes(k))) return TASK_TYPES.ELEMENTOR;
 
   return TASK_TYPES.CONTENT; // default
 }
