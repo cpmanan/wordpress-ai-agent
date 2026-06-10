@@ -54,7 +54,23 @@ async function revertTask(issueKey, commentOnKey) {
         break;
       }
 
-      // DB revert (Yoast SEO) — restore from WP CLI export
+      // SEO revert — restore previous Yoast meta via REST API
+      case 'seo': {
+        const { pageId, savedSeoMeta } = meta;
+        const axiosLib = require('axios');
+        const WP_BASE  = process.env.WP_STAGING_URL;
+        const wpAuth   = { username: process.env.WP_USERNAME, password: process.env.WP_APP_PASSWORD };
+        await axiosLib.post(
+          `${WP_BASE}/wp-json/wp/v2/pages/${pageId}`,
+          { meta: savedSeoMeta },
+          { auth: wpAuth }
+        );
+        await addComment(postTo, `✅ Reverted *${issueKey}* — SEO metadata restored to previous values`);
+        await transitionIssue(postTo, 'Done').catch(() => {});
+        break;
+      }
+
+      // DB revert (legacy) — restore from WP CLI export
       case 'db': {
         const { backupFile } = meta;
         await importDb(backupFile);

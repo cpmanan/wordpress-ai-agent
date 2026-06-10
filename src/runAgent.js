@@ -508,39 +508,78 @@ Return JSON: {
         break;
       }
 
-      // ── SEO: Update Yoast SEO metadata ──────────────────────────────
+      // ── SEO: Update Yoast SEO metadata via REST API ─────────────────
       case TASK_TYPES.SEO: {
-        // Find the page/post mentioned in the task
-        const slugHints = title.toLowerCase().match(/\b(contact|about|services|home|pricing|blog|faq|gallery|team|booking|schedule|classes|yoga|meditation)\b/g) || [];
+        const axios = require('axios');
+        const WP_BASE = process.env.WP_STAGING_URL;
+        const wpAuth  = { username: process.env.WP_USERNAME, password: process.env.WP_APP_PASSWORD };
+
         let targetPage = null;
 
-        for (const slug of slugHints) {
-          targetPage = await getPageBySlug(slug);
-          if (targetPage) break;
+        // 1. Homepage detection — check if task mentions "homepage" or "home page"
+        const isHomepage = /\b(homepage|home page|front page|home)\b/i.test(title + ' ' + description);
+        if (isHomepage) {
+          // Fetch WordPress reading settings to get the static front page ID
+          try {
+            const settingsRes = await axios.get(`${WP_BASE}/wp-json/wp/v2/settings`, { auth: wpAuth });
+            const frontPageId = settingsRes.data?.page_on_front;
+            if (frontPageId && frontPageId !== 0) {
+              targetPage = await getPage(frontPageId);
+              console.log(`✅ Found front page via settings: "${targetPage.title?.rendered}" (ID: ${frontPageId})`);
+            }
+          } catch (e) {
+            console.warn('⚠️  Could not fetch WP settings for front page ID:', e.message);
+          }
+        }
+
+        // 2. Slug / title search fallback
+        if (!targetPage) {
+          const slugHints = title.toLowerCase().match(/\b(contact|about|services|pricing|blog|faq|gallery|team|booking|schedule|classes|yoga|meditation)\b/g) || [];
+          for (const slug of slugHints) {
+            targetPage = await getPageBySlug(slug);
+            if (targetPage) break;
+          }
         }
 
         if (!targetPage) {
-          const results = await findPageByTitle(slugHints[0] || title);
+          const titleWords = title.replace(/phase \d+ test \d+:?/i, '').trim();
+          const results = await findPageByTitle(titleWords);
           if (results.length > 0) targetPage = results[0];
         }
 
         if (!targetPage) {
-          await addComment(issueKey, `⚠️ Could not find the page to update SEO for. Please specify the exact page name.`);
+          await addComment(issueKey,
+            `⚠️ Could not find the page to update SEO for.\n\n` +
+            `Please include the exact page name in the task, e.g:\n` +
+            `• "Update SEO for the *About Us* page"\n` +
+            `• "Update SEO for the *homepage*"\n` +
+            `• "Update SEO for the *Contact* page"`
+          );
           await transitionIssue(issueKey, 'In Review');
           break;
         }
 
-        // Export DB before SEO changes (for revert)
-        const backupFile = await exportDb(issueKey);
+        // 3. Save current Yoast meta for revert (read before overwriting)
+        let savedSeoMeta = {};
+        try {
+          const pageData = await axios.get(`${WP_BASE}/wp-json/wp/v2/pages/${targetPage.id}`, {
+            auth: wpAuth,
+            params: { _fields: 'id,yoast_head_json,meta' }
+          });
+          savedSeoMeta = pageData.data?.meta || {};
+        } catch (e) {
+          console.warn('⚠️  Could not read existing Yoast meta:', e.message);
+        }
 
-        // Ask OpenAI to generate SEO metadata
+        // 4. Ask OpenAI to generate SEO metadata
         const seoResponse = await getOpenAI().chat.completions.create({
           model: 'gpt-4o',
           messages: [
             {
               role: 'system',
               content: `You are an SEO expert for Brinda Yoga, a yoga studio website.
-Generate optimized Yoast SEO metadata.
+Generate optimized Yoast SEO metadata. Use the task requirements if specific values are provided,
+otherwise generate appropriate values based on the page content.
 Return JSON: {
   "seoTitle": "SEO title (max 60 chars)",
   "metaDescription": "Meta description (max 155 chars)",
@@ -549,7 +588,7 @@ Return JSON: {
             },
             {
               role: 'user',
-              content: `Task: ${title}\nPage: "${targetPage.title?.rendered}"\nPage content: ${(targetPage.content?.rendered || '').substring(0, 500)}`
+              content: `Task: ${title}\n\nDetails: ${description}\n\nPage: "${targetPage.title?.rendered}"\nPage content snippet: ${(targetPage.content?.rendered || '').replace(/<[^>]+>/g, '').substring(0, 500)}`
             }
           ],
           response_format: { type: 'json_object' }
@@ -557,26 +596,38 @@ Return JSON: {
 
         const seoData = JSON.parse(seoResponse.choices[0].message.content);
 
-        await updateYoastSeo(targetPage.id, {
-          title: seoData.seoTitle,
-          description: seoData.metaDescription,
-          focusKeyword: seoData.focusKeyword
-        });
+        // 5. Update Yoast SEO via REST API — no SSH needed
+        // Yoast registers these meta fields in the REST API automatically
+        await axios.post(
+          `${WP_BASE}/wp-json/wp/v2/pages/${targetPage.id}`,
+          {
+            meta: {
+              _yoast_wpseo_title:       seoData.seoTitle,
+              _yoast_wpseo_metadesc:    seoData.metaDescription,
+              _yoast_wpseo_focuskw:     seoData.focusKeyword,
+            }
+          },
+          { auth: wpAuth }
+        );
 
+        console.log(`✅ Yoast SEO updated for page ${targetPage.id} via REST API`);
+
+        // 6. Store revert metadata (saved meta for rollback)
         await setRevertMeta(issueKey, {
-          type: 'db',
-          backupFile,
+          type: 'seo',
+          pageId: targetPage.id,
+          savedSeoMeta,
           timestamp: new Date().toISOString()
         });
 
         await transitionIssue(issueKey, 'In Review');
         await addComment(issueKey,
-          `✅ SEO metadata updated for "${targetPage.title?.rendered}".\n\n` +
-          `SEO Title: ${seoData.seoTitle}\n` +
-          `Meta Description: ${seoData.metaDescription}\n` +
-          `Focus Keyword: ${seoData.focusKeyword}\n\n` +
+          `✅ SEO metadata updated for *"${targetPage.title?.rendered}"*.\n\n` +
+          `*SEO Title:* ${seoData.seoTitle}\n` +
+          `*Meta Description:* ${seoData.metaDescription}\n` +
+          `*Focus Keyword:* ${seoData.focusKeyword}\n\n` +
           `──────────────────────\n` +
-          `💬 Available commands:\n` +
+          `💬 Commands:\n` +
           `• \`redo: <feedback>\` — adjust the SEO copy\n` +
           `• \`revert\` — restore previous SEO settings`
         );
