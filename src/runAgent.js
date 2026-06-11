@@ -7,12 +7,23 @@ const { capturePreview } = require('./screenshotter');
 const { createPost, updatePost, getPost, createPage, updatePage, getPage, searchContent, getPageBySlug, findPageByTitle, getMenus, addPageToMenu, addUrlToMenu } = require('./wpRest');
 const { revertTask } = require('./revert');
 const { getPlugins, installPlugin, deactivatePlugin, updateYoastSeo, exportDb } = require('./wpCli');
+const { getKnowledge, getContextForTask, isStale, buildKnowledge } = require('./siteKnowledge');
 
 // Initialize lazily so missing key doesn't crash the server at startup
 let openai;
 function getOpenAI() {
   if (!openai) openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   return openai;
+}
+
+/**
+ * Prepend site knowledge context to a system prompt.
+ * kbCtx comes from getContextForTask() — injected into every GPT call
+ * so the model knows exact page IDs, menu names, plugin states, etc.
+ */
+function withKb(systemContent, kbCtx) {
+  if (!kbCtx) return systemContent;
+  return `${kbCtx}\n\n---\n\n${systemContent}`;
 }
 
 async function runAgent(issueKey, feedbackContext = null) {
@@ -34,6 +45,24 @@ async function runAgent(issueKey, feedbackContext = null) {
   // 3. Detect task type
   const taskType = detectTaskType(title, description);
   console.log(`🔍 Detected task type: ${taskType}`);
+
+  // 3b. Load site knowledge base — build it if missing or stale (>24h)
+  let siteKb = getKnowledge();
+  if (!siteKb) {
+    console.log('📚 No knowledge base found — building one now...');
+    try {
+      siteKb = await buildKnowledge();
+      await addComment(issueKey, `📚 Site knowledge base built (${siteKb.pages?.length} pages, ${siteKb.plugins?.filter(p=>p.status==='active').length} active plugins). Agent now has full site context.`);
+    } catch (kbErr) {
+      console.warn(`⚠️ Knowledge base build failed (non-fatal): ${kbErr.message}`);
+    }
+  } else if (isStale(24)) {
+    // Refresh in background — don't block the task
+    buildKnowledge().then(kb => {
+      console.log(`📚 Knowledge base refreshed in background (${kb.pages?.length} pages)`);
+    }).catch(e => console.warn(`⚠️ Background KB refresh failed: ${e.message}`));
+  }
+  const kbContext = siteKb ? getContextForTask(taskType, siteKb) : '';
 
   try {
     switch (taskType) {
@@ -68,7 +97,7 @@ async function runAgent(issueKey, feedbackContext = null) {
             messages: [
               {
                 role: 'system',
-                content: `You are a WordPress child theme developer for Brinda Yoga website.
+                content: withKb(`You are a WordPress child theme developer for Brinda Yoga website.
 The site uses the VIHARA theme (v1.3.5) by ThemeREX. You MUST use Vihara-specific CSS selectors.
 You will receive:
 1. A task to complete
@@ -94,7 +123,7 @@ Return JSON exactly like this:
     { "file": "functions.php", "content": "<?php // full updated content" }
   ],
   "summary": "brief description of what was changed"
-}`
+}`, kbContext)
               },
               {
                 role: 'user',
@@ -342,7 +371,7 @@ Return JSON: {
           const aiResponse = await getOpenAI().chat.completions.create({
             model: 'gpt-4o',
             messages: [
-              { role: 'system', content: systemPrompt },
+              { role: 'system', content: withKb(systemPrompt, kbContext) },
               {
                 role: 'user',
                 content: isFullReplace
@@ -385,10 +414,10 @@ Return JSON: {
             messages: [
               {
                 role: 'system',
-                content: `You are a content writer for Brinda Yoga, a professional yoga studio website.
+                content: withKb(`You are a content writer for Brinda Yoga, a professional yoga studio website.
 Write an engaging, informative blog post that reflects the brand voice of a mindful yoga studio.
 Use well-structured HTML with headings, paragraphs, and lists where appropriate.
-Return JSON: { "title": "blog post title", "content": "full HTML content", "excerpt": "brief summary (1-2 sentences)" }`
+Return JSON: { "title": "blog post title", "content": "full HTML content", "excerpt": "brief summary (1-2 sentences)" }`, kbContext)
               },
               {
                 role: 'user',
@@ -412,9 +441,9 @@ Return JSON: { "title": "blog post title", "content": "full HTML content", "exce
             messages: [
               {
                 role: 'system',
-                content: `You are a WordPress content writer for Brinda Yoga, a yoga studio website.
+                content: withKb(`You are a WordPress content writer for Brinda Yoga, a yoga studio website.
 Write clean, well-structured HTML content that matches a professional yoga studio design.
-Return JSON: { "title": "page title", "content": "full HTML content" }`
+Return JSON: { "title": "page title", "content": "full HTML content" }`, kbContext)
               },
               {
                 role: 'user',
@@ -482,7 +511,7 @@ Return JSON: { "title": "page title", "content": "full HTML content" }`
           messages: [
             {
               role: 'system',
-              content: `You are a WordPress site manager for Brinda Yoga website.
+              content: withKb(`You are a WordPress site manager for Brinda Yoga website.
 Given a task, decide:
 1. Whether to create a new page or use an existing page
 2. Which navigation menu to add it to
@@ -498,7 +527,7 @@ Return JSON: {
   "menuId": numeric menu ID from the list above,
   "menuItemTitle": "title to show in the menu",
   "menuPosition": null or number
-}`
+}`, kbContext)
             },
             {
               role: 'user',
@@ -707,14 +736,14 @@ Return JSON: {
           messages: [
             {
               role: 'system',
-              content: `You are an SEO expert for Brinda Yoga, a yoga studio website.
+              content: withKb(`You are an SEO expert for Brinda Yoga, a yoga studio website.
 Generate optimized Yoast SEO metadata. Use the task requirements if specific values are provided,
 otherwise generate appropriate values based on the page content.
 Return JSON: {
   "seoTitle": "SEO title (max 60 chars)",
   "metaDescription": "Meta description (max 155 chars)",
   "focusKeyword": "primary focus keyword"
-}`
+}`, kbContext)
             },
             {
               role: 'user',
@@ -872,11 +901,11 @@ add_action('rest_api_init', function() {
           messages: [
             {
               role: 'system',
-              content: `You are a WordPress admin. Parse the plugin task and return JSON: {
+              content: withKb(`You are a WordPress admin. Parse the plugin task and return JSON: {
   "action": "install" or "activate" or "deactivate" or "list",
   "pluginSlug": "wordpress-plugin-slug-from-wordpress.org",
   "pluginName": "Human readable plugin name"
-}`
+}`, kbContext)
             },
             { role: 'user', content: `Task: ${title}\nDescription: ${description}` }
           ],
@@ -1216,7 +1245,7 @@ add_action('rest_api_init', function() {
           messages: [
             {
               role: 'system',
-              content: `You are an Elementor page editor. The widget list may contain:
+              content: withKb(`You are an Elementor page editor. The widget list may contain:
 - Standard widgets (heading, text-editor, button, image)
 - ThemeREX widgets with items arrays — shown as "trx_sc_*[item N]" — these are sub-cards inside a single widget
 
@@ -1242,7 +1271,7 @@ Analyse the task and return ONE of these JSON shapes:
 }
 
 Choose add_card when the task says: add, new card, fourth, insert, create another, duplicate.
-Choose edit for all other cases.`
+Choose edit for all other cases.`, kbContext)
             },
             {
               role: 'user',
@@ -1513,7 +1542,7 @@ async function redoTask(issueKey, feedback) {
       messages: [
         {
           role: 'system',
-          content: `You are a WordPress page editor fixing content based on client feedback.
+          content: withKb(`You are a WordPress page editor fixing content based on client feedback.
 You will be given:
 1. The current page HTML (what the agent last produced)
 2. The original page HTML (before any agent changes)
@@ -1529,7 +1558,7 @@ Return JSON: {
   "title": "page title",
   "content": "complete corrected HTML",
   "what_changed": "brief description of what was fixed based on feedback"
-}`
+}`, kbContext)
         },
         {
           role: 'user',

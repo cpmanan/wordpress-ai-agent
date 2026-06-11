@@ -4,6 +4,7 @@ const { runAgent, redoTask } = require('./runAgent');
 const { revertTask } = require('./revert');
 const { getIssue, addComment, getRevertMeta, transitionIssue } = require('./jira');
 const { updatePost, updatePage } = require('./wpRest');
+const { buildKnowledge, getKnowledge } = require('./siteKnowledge');
 
 const app = express();
 app.use(express.json());
@@ -187,6 +188,50 @@ app.post('/webhook/jira', async (req, res) => {
         const feedback = commentRaw.replace(/^redo[: ]+/i, '').trim();
         console.log(`🔁 Redo requested on ${issueKey}: "${feedback}"`);
         await redoTask(issueKey, feedback);
+      }
+
+      // ── refresh knowledge — rebuild site knowledge base ──────────
+      if (commentText === 'refresh knowledge' || commentText === 'rebuild knowledge') {
+        console.log(`📚 Knowledge base refresh requested on: ${issueKey}`);
+        await addComment(issueKey, `📚 Rebuilding site knowledge base — scanning pages, menus, plugins...`);
+        try {
+          const kb = await buildKnowledge();
+          const activePlugins = (kb.plugins || []).filter(p => p.status === 'active').map(p => p.title);
+          const elemPages = (kb.elementor_pages || []).map(p => `• ID ${p.id}: "${p.title}"`).join('\n');
+          const menuSummary = (kb.menus || []).map(m => `• "${m.name}" (${m.items?.length} items)`).join('\n');
+          await addComment(issueKey,
+            `✅ Knowledge base updated!\n\n` +
+            `*Site:* ${kb.site?.blogname}\n` +
+            `*Pages:* ${kb.pages?.length} total | Front page ID: ${kb.front_page_id}\n` +
+            `*Theme:* ${kb.theme?.child} (parent: ${kb.theme?.parent})\n\n` +
+            `*Active plugins (${activePlugins.length}):*\n${activePlugins.map(p=>`• ${p}`).join('\n')}\n\n` +
+            `*Menus:*\n${menuSummary}\n\n` +
+            `*Elementor pages (${kb.elementor_pages?.length}):*\n${elemPages}\n\n` +
+            `*Custom post types:* ${(kb.custom_post_types||[]).map(c=>c.slug).join(', ') || 'none'}\n\n` +
+            `Agent will now use this knowledge for all future tasks.`
+          );
+        } catch (kbErr) {
+          await addComment(issueKey, `❌ Knowledge base rebuild failed: ${kbErr.message}`);
+        }
+      }
+
+      // ── show knowledge — display current knowledge base summary ──
+      if (commentText === 'show knowledge') {
+        const kb = getKnowledge();
+        if (!kb) {
+          await addComment(issueKey, `📚 No knowledge base found. Comment \`refresh knowledge\` to build one.`);
+        } else {
+          const activePlugins = (kb.plugins || []).filter(p => p.status === 'active').map(p => p.title);
+          await addComment(issueKey,
+            `📚 *Current Knowledge Base* (built ${kb.generated_at?.substring(0,10)})\n\n` +
+            `*Pages:* ${kb.pages?.length}\n` +
+            `*Elementor pages:* ${kb.elementor_pages?.length}\n` +
+            `*Active plugins:* ${activePlugins.join(', ')}\n` +
+            `*Menus:* ${(kb.menus||[]).map(m=>m.name).join(', ')}\n` +
+            `*Front page ID:* ${kb.front_page_id}\n\n` +
+            `Comment \`refresh knowledge\` to update.`
+          );
+        }
       }
     }
 
