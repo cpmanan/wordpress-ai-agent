@@ -75,7 +75,8 @@ const ELEMENTOR_KEYWORDS = [
   'about us page', 'about page', 'buy classes', 'classes page',
   'home page', 'homepage', 'contact page', 'services page',
   // Content field edits that live inside Elementor widgets
-  'description paragraph', 'paragraph', 'yoga description',
+  // NOTE: avoid single generic words like "paragraph" — match compound phrases only
+  'description paragraph', 'yoga description',
   'section text', 'widget text', 'text block', 'text editor',
   'update paragraph', 'edit paragraph', 'rewrite paragraph',
   'update section', 'edit section', 'update widget', 'hero text',
@@ -125,6 +126,10 @@ function detectTaskType(title, description = '') {
   if (NAV_KEYWORDS.some(k => text.includes(k)))          return TASK_TYPES.NAV;
 
   if (SEO_KEYWORDS.some(k => text.includes(k)))          return TASK_TYPES.SEO;
+
+  // Explicit blog/post creation signals always → CONTENT (even if description mentions "paragraph" etc.)
+  const BLOG_POST_SIGNALS = ['blog post', 'write post', 'new post', 'create post', 'write a post', 'write blog', 'new blog'];
+  if (BLOG_POST_SIGNALS.some(k => text.includes(k)))     return TASK_TYPES.CONTENT;
 
   // ELEMENTOR before CONTENT — "update heading via elementor" is Elementor, not content
   if (ELEMENTOR_KEYWORDS.some(k => text.includes(k)))    return TASK_TYPES.ELEMENTOR;
