@@ -1092,43 +1092,63 @@ add_action('rest_api_init', function() {
           timestamp: new Date().toISOString()
         });
 
-        // Step 3: Perform the update
+        // Step 3: Perform the update via brinda-agent REST (no SSH/WP-CLI on Railway)
+        const agentBase    = `${process.env.WP_STAGING_URL}/wp-json/brinda-agent/v1`;
+        const agentHeaders = { 'X-Agent-Token': process.env.AGENT_TOKEN || '' };
+
         try {
           if (backupPlan.target === 'plugin' && backupPlan.pluginSlug) {
-            // Update specific plugin via WP-CLI
-            const { runWpCli } = require('./wpCli');
-            const updateResult = await runWpCli(`plugin update ${backupPlan.pluginSlug} --format=json`);
-            await transitionIssue(issueKey, 'In Review');
-            await addComment(issueKey,
-              `✅ *Plugin updated successfully!*\n\n` +
-              `• *Plugin:* ${backupPlan.pluginName || backupPlan.pluginSlug}\n` +
-              `• *Backup ID:* \`${backupCheckpoint.id}\`\n\n` +
-              `If anything looks broken, restore from checkpoint in WP Engine portal → Backups.\n\n` +
-              `• \`revert\` — restore from backup checkpoint ${backupCheckpoint.id}`
+            const upRes = await axios.post(
+              `${agentBase}/update-plugin`,
+              { plugin_slug: backupPlan.pluginSlug },
+              { headers: agentHeaders, timeout: 120000 }
             );
+            const upData = upRes.data;
+            await transitionIssue(issueKey, 'In Review');
+            if (upData.updated) {
+              await addComment(issueKey,
+                `✅ *Plugin updated successfully!*\n\n` +
+                `• *Plugin:* ${upData.plugin}\n` +
+                `• *Version:* ${upData.old_version} → ${upData.new_version}\n` +
+                `• *Backup ID:* \`${backupCheckpoint.id}\`\n\n` +
+                `If anything looks broken, restore from checkpoint in WP Engine portal → Backups.\n\n` +
+                `• \`revert\` — restore from backup checkpoint ${backupCheckpoint.id}`
+              );
+            } else {
+              await addComment(issueKey,
+                `ℹ️ *${upData.plugin} is already up to date* (v${upData.version})\n\n` +
+                `No update was needed. Backup checkpoint \`${backupCheckpoint.id}\` was created and can be discarded.\n\n` +
+                `To check for available updates: WP Engine portal → brindayogacstg → Plugins and themes.`
+              );
+            }
           } else if (backupPlan.target === 'core') {
-            const { runWpCli } = require('./wpCli');
-            await runWpCli('core update');
+            // WordPress core update — not possible via REST without shell; advise manual
             await transitionIssue(issueKey, 'In Review');
             await addComment(issueKey,
-              `✅ *WordPress core updated!*\n\n` +
-              `• *Backup ID:* \`${backupCheckpoint.id}\`\n\n` +
-              `If anything looks broken, restore from checkpoint in WP Engine portal → Backups.`
+              `ℹ️ *WordPress core update requires WP Engine portal*\n\n` +
+              `Backup checkpoint \`${backupCheckpoint.id}\` is ready.\n\n` +
+              `To update WP core: WP Engine portal → brindayogacstg → Overview → WordPress → Update now`
             );
           } else {
-            // all plugins or ambiguous — update all
-            const { runWpCli } = require('./wpCli');
-            await runWpCli('plugin update --all');
+            // Update all plugins
+            const upRes = await axios.post(
+              `${agentBase}/update-plugin`,
+              { plugin_slug: 'all' },
+              { headers: agentHeaders, timeout: 180000 }
+            );
+            const upData = upRes.data;
             await transitionIssue(issueKey, 'In Review');
+            const updatedList = (upData.updated || []).map(u => `• ${u.file} → v${u.new_version}`).join('\n') || '(none needed)';
             await addComment(issueKey,
               `✅ *All plugins updated!*\n\n` +
+              `• *Updated (${upData.update_count || 0}):*\n${updatedList}\n\n` +
               `• *Backup ID:* \`${backupCheckpoint.id}\`\n\n` +
               `If anything looks broken, restore from checkpoint in WP Engine portal → Backups.`
             );
           }
         } catch (updateErr) {
           await addComment(issueKey,
-            `❌ Update failed: ${updateErr.message}\n\n` +
+            `❌ Update failed: ${updateErr.response?.data?.message || updateErr.message}\n\n` +
             `*Backup checkpoint is intact:* \`${backupCheckpoint.id}\`\n` +
             `Restore it in WP Engine portal → your install → Backup Points.`
           );

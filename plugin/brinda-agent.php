@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Brinda Agent API
  * Description: REST API endpoints for the WordPress AI Agent (Railway → WP Engine over HTTPS)
- * Version: 2.1
+ * Version: 2.2
  * Author: Brinda AI Agent
  */
 
@@ -141,6 +141,27 @@ add_action('rest_api_init', function () {
   register_rest_route('brinda-agent/v1', '/update-content', [
     'methods'             => 'POST',
     'callback'            => 'brinda_update_content',
+    'permission_callback' => 'brinda_auth',
+  ]);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // POST /wp-json/brinda-agent/v1/update-plugin
+  // Updates a specific plugin (or all plugins) using WordPress upgrader API.
+  // Body: { "plugin_slug": "contact-form-7" } or { "plugin_slug": "all" }
+  // ══════════════════════════════════════════════════════════════════════════
+  register_rest_route('brinda-agent/v1', '/update-plugin', [
+    'methods'             => 'POST',
+    'callback'            => 'brinda_update_plugin',
+    'permission_callback' => 'brinda_auth',
+  ]);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // GET /wp-json/brinda-agent/v1/plugin-list
+  // Returns all installed plugins with name, version, status, update available
+  // ══════════════════════════════════════════════════════════════════════════
+  register_rest_route('brinda-agent/v1', '/plugin-list', [
+    'methods'             => 'GET',
+    'callback'            => 'brinda_plugin_list',
     'permission_callback' => 'brinda_auth',
   ]);
 });
@@ -634,5 +655,134 @@ function brinda_update_content(WP_REST_Request $request) {
     "post_id"  => $post_id,
     "updated"  => array_keys($update),
     "post_type"=> $post->post_type,
+  ]);
+}
+
+// ── /plugin-list ────────────────────────────────────────────────────────────
+function brinda_plugin_list() {
+  if (!function_exists('get_plugins')) {
+    require_once ABSPATH . 'wp-admin/includes/plugin.php';
+  }
+  if (!function_exists('get_plugin_updates')) {
+    require_once ABSPATH . 'wp-admin/includes/update.php';
+  }
+
+  $all_plugins    = get_plugins();
+  $active_plugins = get_option('active_plugins', []);
+  wp_update_plugins(); // refresh update transient
+  $updates = get_plugin_updates();
+
+  $result = [];
+  foreach ($all_plugins as $file => $data) {
+    $slug = explode('/', $file)[0];
+    $result[] = [
+      'file'             => $file,
+      'slug'             => $slug,
+      'name'             => $data['Name'],
+      'version'          => $data['Version'],
+      'status'           => in_array($file, $active_plugins) ? 'active' : 'inactive',
+      'update_available' => isset($updates[$file]),
+      'new_version'      => isset($updates[$file]) ? $updates[$file]->update->new_version : null,
+    ];
+  }
+
+  return rest_ensure_response(['plugins' => $result, 'count' => count($result)]);
+}
+
+// ── /update-plugin ──────────────────────────────────────────────────────────
+function brinda_update_plugin(WP_REST_Request $request) {
+  $plugin_slug = sanitize_text_field($request->get_param('plugin_slug'));
+  if (!$plugin_slug) {
+    return new WP_Error('missing_param', 'plugin_slug is required', ['status' => 400]);
+  }
+
+  // Load required WP upgrader classes
+  require_once ABSPATH . 'wp-admin/includes/class-wp-upgrader.php';
+  require_once ABSPATH . 'wp-admin/includes/class-automatic-upgrader-skin.php';
+  require_once ABSPATH . 'wp-admin/includes/plugin.php';
+  require_once ABSPATH . 'wp-admin/includes/update.php';
+
+  if (!function_exists('get_plugins')) require_once ABSPATH . 'wp-admin/includes/plugin.php';
+
+  wp_update_plugins(); // refresh available updates
+  $updates = get_plugin_updates();
+
+  if ($plugin_slug === 'all') {
+    // Update all plugins with available updates
+    $updated  = [];
+    $skipped  = [];
+    $failed   = [];
+
+    foreach ($updates as $file => $data) {
+      $skin     = new Automatic_Upgrader_Skin();
+      $upgrader = new Plugin_Upgrader($skin);
+      $result   = $upgrader->upgrade($file);
+      if (is_wp_error($result)) {
+        $failed[] = $file;
+      } elseif ($result === false) {
+        $skipped[] = $file; // already up to date
+      } else {
+        $updated[] = ['file' => $file, 'new_version' => $data->update->new_version ?? 'latest'];
+      }
+    }
+
+    return rest_ensure_response([
+      'success' => true,
+      'target'  => 'all',
+      'updated' => $updated,
+      'skipped' => $skipped,
+      'failed'  => $failed,
+      'update_count' => count($updated),
+    ]);
+  }
+
+  // Find the plugin file for this slug
+  $all_plugins = get_plugins();
+  $plugin_file = null;
+  foreach ($all_plugins as $file => $data) {
+    if (explode('/', $file)[0] === $plugin_slug || strpos($file, $plugin_slug) === 0) {
+      $plugin_file = $file;
+      break;
+    }
+  }
+
+  if (!$plugin_file) {
+    return new WP_Error('not_found', "Plugin not found: {$plugin_slug}", ['status' => 404]);
+  }
+
+  $plugin_data    = $all_plugins[$plugin_file];
+  $old_version    = $plugin_data['Version'];
+
+  // Check if update is available
+  if (!isset($updates[$plugin_file])) {
+    return rest_ensure_response([
+      'success'   => true,
+      'plugin'    => $plugin_data['Name'],
+      'file'      => $plugin_file,
+      'version'   => $old_version,
+      'message'   => 'Plugin is already up to date',
+      'updated'   => false,
+    ]);
+  }
+
+  $new_version = $updates[$plugin_file]->update->new_version ?? 'latest';
+
+  // Run the upgrade
+  $skin     = new Automatic_Upgrader_Skin();
+  $upgrader = new Plugin_Upgrader($skin);
+  $result   = $upgrader->upgrade($plugin_file);
+
+  if (is_wp_error($result)) {
+    return new WP_Error('update_failed', $result->get_error_message(), ['status' => 500]);
+  }
+
+  return rest_ensure_response([
+    'success'      => true,
+    'plugin'       => $plugin_data['Name'],
+    'file'         => $plugin_file,
+    'old_version'  => $old_version,
+    'new_version'  => $new_version,
+    'updated'      => true,
+    'message'      => "Updated {$plugin_data['Name']} from {$old_version} to {$new_version}",
   ]);
 }
