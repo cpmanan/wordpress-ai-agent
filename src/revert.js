@@ -135,12 +135,52 @@ async function revertTask(issueKey, commentOnKey) {
         break;
       }
 
-      // Plugin revert — deactivate and uninstall
+      // Plugin revert — deactivate/re-activate via brinda-agent REST (no WP-CLI on Railway)
       case 'plugin': {
-        const { pluginSlug } = meta;
-        await deactivatePlugin(pluginSlug);
-        await runWpCli(`plugin uninstall ${pluginSlug}`);
-        await addComment(postTo, `✅ Reverted *${issueKey}* — plugin "${pluginSlug}" deactivated and removed`);
+        const { pluginSlug, action, backupCheckpointId } = meta;
+        const agentBase = `${process.env.WP_STAGING_URL}/wp-json/brinda-agent/v1`;
+        const agentHdrs = { 'X-Agent-Token': process.env.AGENT_TOKEN || '' };
+        const bkNote    = backupCheckpointId ? `\n• Backup checkpoint: \`${backupCheckpointId}\`` : '';
+
+        if (action === 'install' || action === 'install_manual') {
+          // Plugin was installed — deactivate + delete it
+          try {
+            const res = await axios.post(
+              `${agentBase}/deactivate-plugin`,
+              { plugin_slug: pluginSlug, delete: true },
+              { headers: agentHdrs, timeout: 30000 }
+            );
+            await addComment(postTo,
+              `✅ Reverted *${issueKey}* — plugin "${pluginSlug}" deactivated and deleted\n` +
+              `${bkNote}\nOriginal state from: ${timestamp}`
+            );
+          } catch (e) {
+            await addComment(postTo,
+              `⚠️ Could not auto-deactivate "${pluginSlug}": ${e.response?.data?.message || e.message}\n\n` +
+              `Please deactivate manually: [WP Admin → Plugins|${process.env.WP_STAGING_URL}/wp-admin/plugins.php]`
+            );
+          }
+        } else if (action === 'deactivate') {
+          // Plugin was deactivated — re-activate it
+          try {
+            const res = await axios.post(
+              `${agentBase}/install-plugin`,
+              { plugin_slug: pluginSlug },
+              { headers: agentHdrs, timeout: 60000 }
+            );
+            await addComment(postTo,
+              `✅ Reverted *${issueKey}* — plugin "${pluginSlug}" re-activated\n` +
+              `${bkNote}\nOriginal state from: ${timestamp}`
+            );
+          } catch (e) {
+            await addComment(postTo,
+              `⚠️ Could not re-activate "${pluginSlug}": ${e.response?.data?.message || e.message}\n\n` +
+              `Please activate manually: [WP Admin → Plugins|${process.env.WP_STAGING_URL}/wp-admin/plugins.php]`
+            );
+          }
+        } else {
+          await addComment(postTo, `⚠️ Unknown plugin revert action "${action}" for *${issueKey}*. Please revert manually.`);
+        }
         await transitionIssue(postTo, 'Done').catch(() => {});
         break;
       }
@@ -167,12 +207,33 @@ async function revertTask(issueKey, commentOnKey) {
         break;
       }
 
-      // WP Engine full backup restore
+      // WP Engine backup checkpoint — guide user to restore via portal
+      // (WP Engine REST API does not expose a restore endpoint — must be done via portal UI)
       case 'backup': {
-        const { backupId } = meta;
-        const { restoreBackup } = require('./wpEngineBackup');
-        await restoreBackup(backupId);
-        await addComment(postTo, `✅ Reverted *${issueKey}* — WP Engine backup ${backupId} restored`);
+        const { backupCheckpointId, pluginSlug, target } = meta;
+        const portalUrl = `https://my.wpengine.com/installs/brindayogacstg/backup_points`;
+        const what = pluginSlug
+          ? `plugin update: ${pluginSlug}`
+          : target === 'core' ? 'WordPress core update' : 'all plugin updates';
+
+        if (backupCheckpointId) {
+          await addComment(postTo,
+            `🔄 *Revert instructions for *${issueKey}** (${what})\n\n` +
+            `A WP Engine backup checkpoint was created before this operation:\n` +
+            `• *Checkpoint ID:* \`${backupCheckpointId}\`\n\n` +
+            `*To restore:*\n` +
+            `1. Go to [WP Engine portal → Backup Points|${portalUrl}]\n` +
+            `2. Find checkpoint \`${backupCheckpointId.substring(0,8)}...\`\n` +
+            `3. Click *Restore* → confirm\n\n` +
+            `⚠️ Restoring will roll back the entire site to that checkpoint — including files and database.`
+          );
+        } else {
+          await addComment(postTo,
+            `⚠️ No backup checkpoint ID found for *${issueKey}*.\n\n` +
+            `Check [WP Engine portal → Backup Points|${portalUrl}] for recent automatic backups.`
+          );
+        }
+        await transitionIssue(postTo, 'Done').catch(() => {});
         break;
       }
 

@@ -1113,6 +1113,14 @@ add_action('rest_api_init', function() {
             { plugin_slug: pluginPlan.pluginSlug, delete: false },
             { headers: agentPluginHdrs, timeout: 30000 }
           );
+          // Store revert meta so `revert` comment can re-activate
+          await setRevertMeta(issueKey, {
+            type:               'plugin',
+            action:             'deactivate',
+            pluginSlug:         pluginPlan.pluginSlug,
+            backupCheckpointId: pluginBackupId,
+            timestamp:          new Date().toISOString()
+          });
           await transitionIssue(issueKey, 'In Review');
           await addComment(issueKey,
             `✅ *${deactRes.data.message}*\n\n` +
