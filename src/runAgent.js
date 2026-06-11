@@ -109,11 +109,52 @@ async function runAgent(issueKey, feedbackContext = null, forcedTaskType = null)
       console.log(`📚 Knowledge base refreshed in background (${kb.pages?.length} pages)`);
     }).catch(e => console.warn(`⚠️ Background KB refresh failed: ${e.message}`));
   }
-  const kbContext     = siteKb ? getContextForTask(taskType, siteKb) : '';
+  let kbContext     = siteKb ? getContextForTask(taskType, siteKb) : '';
   const memoryContext = getMemoryContext();
 
+  // ── Smart page-based type resolution ─────────────────────────────────────
+  // For CONTENT/ELEMENTOR tasks: look up the actual target page and check if
+  // it uses Elementor — then override taskType based on ground truth, not keywords.
+  // Skip for blog/post creation tasks (no target page to look up).
+  let resolvedTaskType = taskType;
+  const isCreationTask = /\b(write|create|new|add)\b.{0,20}\b(post|blog|article)\b/i.test(`${title} ${description}`);
+
+  if (!forcedTaskType && !isCreationTask && (taskType === TASK_TYPES.CONTENT || taskType === TASK_TYPES.ELEMENTOR) && siteKb) {
+    const allPages      = siteKb.pages || [];
+    const elementorIds  = new Set((siteKb.elementor_pages || []).map(p => p.id));
+    const taskText      = `${title} ${description}`.toLowerCase();
+
+    // Try to match the target page from KB by title keywords
+    const scored = allPages
+      .filter(p => p.id && p.title && !p.title.toLowerCase().includes('elementor page #'))
+      .map(p => {
+        const words    = p.title.toLowerCase().split(/\W+/).filter(w => w.length > 3);
+        const matches  = words.filter(w => taskText.includes(w)).length;
+        return { ...p, score: matches };
+      })
+      .filter(p => p.score > 0)
+      .sort((a, b) => b.score - a.score);
+
+    if (scored.length > 0) {
+      const best = scored[0];
+      const usesElementor = elementorIds.has(best.id);
+      const overrideType  = usesElementor ? TASK_TYPES.ELEMENTOR : TASK_TYPES.CONTENT;
+
+      if (overrideType !== taskType) {
+        console.log(`🔍 Page-based type override: "${best.title}" (ID: ${best.id}) uses_elementor=${usesElementor} → ${overrideType} (was ${taskType})`);
+        resolvedTaskType = overrideType;
+        kbContext = siteKb ? getContextForTask(resolvedTaskType, siteKb) : '';
+      } else {
+        console.log(`🔍 Page-based type confirmed: "${best.title}" (ID: ${best.id}) uses_elementor=${usesElementor} → ${taskType}`);
+      }
+    }
+  }
+
+  // Use resolvedTaskType for all routing from here on
+  const finalTaskType = resolvedTaskType;
+
   try {
-    switch (taskType) {
+    switch (finalTaskType) {
 
       // ── FILE: Edit child theme CSS/PHP ──────────────────────────────
       case TASK_TYPES.FILE: {
@@ -2635,7 +2676,7 @@ Return JSON: {
     console.error(`❌ Error processing ${issueKey}:`, err.message);
     // Record error pattern in memory so agent learns from it
     const errorSig = err.message.replace(/\d+/g, 'N').substring(0, 80);
-    rememberErrorPattern(errorSig, `task: ${title} | type: ${taskType}`, 'see error log', issueKey);
+    rememberErrorPattern(errorSig, `task: ${title} | type: ${finalTaskType}`, 'see error log', issueKey);
     // Move to In Review (not To Do) so it's visible and doesn't auto-retrigger
     await addComment(issueKey,
       `❌ Agent encountered an error:\n\n${err.message}\n\n` +
