@@ -2442,14 +2442,14 @@ Keep count between 1 and 5.` },
             { role: 'system', content: withKb(`You are a WooCommerce product editor.
 Determine what needs to change on which product.
 Return JSON: {
-  "product_slug": "slug or name of the product",
+  "product_name": "exact display name of the product as it appears in the store (e.g. Meditations of the Mat)",
   "product_id": null,
   "changes": {
     "name":              "new title (omit if unchanged)",
     "description":       "new description HTML (omit if unchanged)",
     "short_description": "new short description (omit if unchanged)",
-    "regular_price":     "e.g. 29.99 (omit if unchanged)",
-    "sale_price":        "e.g. 19.99 (omit if unchanged)",
+    "regular_price":     "e.g. 29.99 as string (omit if unchanged)",
+    "sale_price":        "e.g. 19.99 as string (omit if unchanged)",
     "status":            "publish|draft (omit if unchanged)"
   },
   "image_search_query": "search query for product image (omit if no image change needed)",
@@ -2465,38 +2465,54 @@ Return JSON: {
         const WP_BASE = process.env.WP_STAGING_URL;
         const wpAuth  = { username: process.env.WP_USERNAME, password: process.env.WP_APP_PASSWORD };
 
+        // Product search term — prefer display name over slug (WC search matches title, not slug)
+        const wcSearchTerm = wcData.product_name || wcData.product_slug || '';
+
         // Find the product via WooCommerce REST API (wc/v3/products supports App Password auth)
-        let productId   = wcData.product_id;
+        let productId    = wcData.product_id || null;
         let savedProduct = null;
-        if (!productId && wcData.product_slug) {
-          const searchRes = await axios.get(`${WP_BASE}/wp-json/wc/v3/products`, {
-            auth: wpAuth,
-            params: { search: wcData.product_slug, per_page: 5 }
-          }).catch(() => null);
-          const products = searchRes?.data || [];
-          if (products.length) {
-            productId    = products[0].id;
-            savedProduct = products[0]; // save for revert
-            console.log(`✅ Found product via wc/v3: "${products[0].name}" (ID: ${productId})`);
+
+        if (!productId && wcSearchTerm) {
+          try {
+            const searchRes = await axios.get(`${WP_BASE}/wp-json/wc/v3/products`, {
+              auth: wpAuth,
+              params: { search: wcSearchTerm, per_page: 5 }
+            });
+            const products = searchRes?.data || [];
+            if (products.length) {
+              productId    = products[0].id;
+              savedProduct = products[0];
+              console.log(`✅ Found product via wc/v3: "${products[0].name}" (ID: ${productId})`);
+            } else {
+              console.log(`⚠️ wc/v3 search returned 0 results for "${wcSearchTerm}"`);
+            }
+          } catch (wcErr) {
+            console.warn(`⚠️ wc/v3 search failed (${wcErr.response?.status} ${wcErr.response?.data?.message || wcErr.message}) — trying wp/v2 fallback`);
           }
         }
 
-        // If not found via wc/v3, fall back to wp/v2/product (search only)
-        if (!productId && wcData.product_slug) {
-          const searchRes2 = await axios.get(`${WP_BASE}/wp-json/wp/v2/product`, {
-            auth: wpAuth,
-            params: { search: wcData.product_slug, per_page: 5 }
-          }).catch(() => null);
-          const products2 = searchRes2?.data || [];
-          if (products2.length) {
-            productId = products2[0].id;
-            console.log(`✅ Found product via wp/v2: "${products2[0].title?.rendered}" (ID: ${productId})`);
+        // Fallback: wp/v2/product (standard WP REST — works when wc/v3 is blocked)
+        if (!productId && wcSearchTerm) {
+          try {
+            const searchRes2 = await axios.get(`${WP_BASE}/wp-json/wp/v2/product`, {
+              auth: wpAuth,
+              params: { search: wcSearchTerm, per_page: 5 }
+            });
+            const products2 = searchRes2?.data || [];
+            if (products2.length) {
+              productId = products2[0].id;
+              console.log(`✅ Found product via wp/v2: "${products2[0].title?.rendered}" (ID: ${productId})`);
+            } else {
+              console.log(`⚠️ wp/v2 search returned 0 results for "${wcSearchTerm}"`);
+            }
+          } catch (wp2Err) {
+            console.warn(`⚠️ wp/v2 fallback also failed: ${wp2Err.response?.status} ${wp2Err.message}`);
           }
         }
 
         if (!productId) {
           await addComment(issueKey,
-            `⚠️ Could not find product "${wcData.product_slug}" in WooCommerce.\n\n` +
+            `⚠️ Could not find product "${wcSearchTerm}" in WooCommerce.\n\n` +
             `Please check the product name or provide the product ID in the description.\n` +
             `[WooCommerce Products|${WP_BASE}/wp-admin/edit.php?post_type=product]`
           );
