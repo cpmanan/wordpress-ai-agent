@@ -106,6 +106,17 @@ add_action('rest_api_init', function () {
   ]);
 
   // ══════════════════════════════════════════════════════════════════════════
+  // GET /wp-json/brinda-agent/v1/raw-meta?post_id=123&meta_key=_elementor_data
+  // Returns the raw value directly from wp_postmeta (no PHP processing).
+  // Useful for debugging: see exactly what Elementor stores in the DB.
+  // ══════════════════════════════════════════════════════════════════════════
+  register_rest_route('brinda-agent/v1', '/raw-meta', [
+    'methods'             => 'GET',
+    'callback'            => 'brinda_raw_meta',
+    'permission_callback' => 'brinda_auth',
+  ]);
+
+  // ══════════════════════════════════════════════════════════════════════════
   // DELETE /wp-json/brinda-agent/v1/delete-post?post_id=123
   // Works for any post type (CPT, post, page). Uses wp_delete_post() directly.
   // ══════════════════════════════════════════════════════════════════════════
@@ -444,6 +455,60 @@ function brinda_extended_info() {
     'db_schema'      => $db_schema,
     'plugin_configs' => $plugin_configs,
     'custom_code'    => $custom_code,
+  ]);
+}
+
+// ── /raw-meta GET ─────────────────────────────────────────────────────────
+// Returns the raw wp_postmeta value straight from the DB — no unserializing,
+// no Elementor processing. Use for debugging what's actually stored.
+function brinda_raw_meta(WP_REST_Request $request) {
+  global $wpdb;
+  $post_id  = (int) $request->get_param('post_id');
+  $meta_key = $request->get_param('meta_key') ?: '_elementor_data';
+  if (!$post_id) return new WP_Error('missing_param', 'post_id required', ['status' => 400]);
+
+  // Query raw from DB — bypasses all WP caching and processing
+  $raw = $wpdb->get_var($wpdb->prepare(
+    "SELECT meta_value FROM {$wpdb->postmeta} WHERE post_id = %d AND meta_key = %s LIMIT 1",
+    $post_id, $meta_key
+  ));
+
+  if ($raw === null) {
+    return new WP_Error('not_found', "No meta found for post_id={$post_id} meta_key={$meta_key}", ['status' => 404]);
+  }
+
+  // Try to decode if JSON, otherwise return raw string
+  $decoded = json_decode($raw, true);
+  $is_json = (json_last_error() === JSON_ERROR_NONE);
+
+  // If it's _elementor_data, extract widget settings for quick inspection
+  $widget_summary = [];
+  if ($is_json && $meta_key === '_elementor_data') {
+    $stack = $decoded;
+    while (!empty($stack)) {
+      $node = array_shift($stack);
+      if (($node['elType'] ?? '') === 'widget') {
+        $wt = $node['widgetType'] ?? 'unknown';
+        $s  = $node['settings'] ?? [];
+        $widget_summary[] = [
+          'widgetType' => $wt,
+          'settings'   => $s,
+        ];
+      }
+      foreach (($node['elements'] ?? []) as $child) {
+        array_unshift($stack, $child);
+      }
+    }
+  }
+
+  return rest_ensure_response([
+    'post_id'        => $post_id,
+    'meta_key'       => $meta_key,
+    'raw_length'     => strlen($raw),
+    'is_json'        => $is_json,
+    'raw_value'      => $is_json ? null : $raw,          // only for non-JSON meta
+    'parsed'         => $is_json ? $decoded : null,       // full parsed JSON
+    'widget_summary' => $widget_summary,                  // quick widget settings view
   ]);
 }
 
