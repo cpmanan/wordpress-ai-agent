@@ -1235,60 +1235,85 @@ add_action('rest_api_init', function() {
         indexWidgets(parsed);
         console.log(`📋 Found ${widgetRefs.length} text/item widgets in Elementor data`);
 
+        // All widgets — used for edit path
         const widgetSummary = widgetRefs.map(w => ({
           index:      w.index,
           widgetType: w.widgetType,
           field:      w.field,
           preview:    w.preview,
-          // isItem=true means this is a sub-card inside a widget's items[] array
-          // For add_card, clone_from_widget_index MUST point to an isItem=true entry
           isItem:     w.isItem || false,
         }));
 
-        // 6. Ask GPT to determine ACTION (edit or add_card) + target details
-        const elemResponse = await getOpenAI().chat.completions.create({
+        // Card-items only — used for add_card path so GPT can't pick a section heading
+        const cardItemSummary = widgetRefs
+          .filter(w => w.isItem && !w.isImage)
+          .map(w => ({ index: w.index, widgetType: w.widgetType, field: w.field, preview: w.preview }));
+
+        // 6a. CALL 1 — detect action (edit vs add_card)
+        const actionResponse = await getOpenAI().chat.completions.create({
           model: 'gpt-4o',
           messages: [
             {
               role: 'system',
-              content: withKb(`You are an Elementor page editor. The widget list may contain:
-- Standard widgets (heading, text-editor, button, image)
-- ThemeREX widgets with items arrays — shown as "trx_sc_*[item N]" — these are sub-cards inside a single widget
-
-Analyse the task and return ONE of these JSON shapes:
-
-**Action: edit** — change text in an existing widget or item
-{
-  "action": "edit",
-  "widget_index": <number from the list>,
-  "new_text": "replacement text",
-  "what_changed": "brief description"
-}
-
-**Action: add_card** — add a new card to a group (items array or column-based section)
-{
-  "action": "add_card",
-  "clone_from_widget_index": <index of a title/heading widget from the SAME card group to clone — pick the first item in that group>,
-  "new_heading": "heading text for the new card",
-  "new_description": "body text for the new card",
-  "new_button_text": "button label (optional)",
-  "image_search_query": "keywords to find a photo for this card",
-  "what_changed": "brief description"
-}
-
-Choose add_card when the task says: add, new card, fourth, insert, create another, duplicate.
-Choose edit for all other cases.`, kbContext)
+              content: `You are an Elementor task classifier. Decide whether the task requires EDITING an existing widget or ADDING a new card.
+Return JSON: { "action": "edit" | "add_card", "reason": "one sentence" }
+Choose "add_card" when task says: add, new card, fourth, insert, create another, duplicate a card.
+Choose "edit" for everything else.`
             },
-            {
-              role: 'user',
-              content: `Task: ${title}\n\nDetails: ${description}\n\nPage: "${elemPage.title?.rendered}"\n\nWidgets:\n${JSON.stringify(widgetSummary, null, 2).substring(0, 8000)}`
-            }
+            { role: 'user', content: `Task: ${title}\n\nDetails: ${description}` }
           ],
           response_format: { type: 'json_object' }
         });
+        const actionDecision = JSON.parse(actionResponse.choices[0].message.content);
+        console.log(`🤖 GPT action decision: ${actionDecision.action} — ${actionDecision.reason}`);
 
-        const elemResult = JSON.parse(elemResponse.choices[0].message.content);
-        console.log(`🤖 GPT Elementor action:`, JSON.stringify(elemResult));
+        let elemResult;
+
+        if (actionDecision.action === 'add_card') {
+          // 6b. CALL 2 (add_card) — show ONLY card items so GPT picks from the right group
+          if (cardItemSummary.length === 0) {
+            // No items[] found — fall back to full widget list with column-based approach
+            const r = await getOpenAI().chat.completions.create({
+              model: 'gpt-4o',
+              messages: [
+                { role: 'system', content: withKb(`You are adding a new card to an Elementor page.
+Pick a widget index from an EXISTING card to clone (heading widget inside a card column).
+Return JSON: { "clone_from_widget_index": <number>, "new_heading": "...", "new_description": "...", "new_button_text": "...", "image_search_query": "...", "what_changed": "..." }`, kbContext) },
+                { role: 'user', content: `Task: ${title}\n\nDetails: ${description}\n\nPage: "${elemPage.title?.rendered}"\n\nWidgets:\n${JSON.stringify(widgetSummary, null, 2).substring(0, 6000)}` }
+              ],
+              response_format: { type: 'json_object' }
+            });
+            elemResult = { action: 'add_card', ...JSON.parse(r.choices[0].message.content) };
+          } else {
+            // Items[] found — show ONLY those widgets, eliminating wrong-index risk
+            const r = await getOpenAI().chat.completions.create({
+              model: 'gpt-4o',
+              messages: [
+                { role: 'system', content: withKb(`You are adding a new card to an Elementor page.
+The list below shows ONLY the existing card items (sub-cards inside a widget group).
+Pick which one to clone — choose the one from the same group as where the new card belongs.
+Return JSON: { "clone_from_widget_index": <index from the list below>, "new_heading": "...", "new_description": "...", "new_button_text": "...", "image_search_query": "...", "what_changed": "..." }`, kbContext) },
+                { role: 'user', content: `Task: ${title}\n\nDetails: ${description}\n\nPage: "${elemPage.title?.rendered}"\n\nCard items to clone from:\n${JSON.stringify(cardItemSummary, null, 2)}` }
+              ],
+              response_format: { type: 'json_object' }
+            });
+            elemResult = { action: 'add_card', ...JSON.parse(r.choices[0].message.content) };
+          }
+        } else {
+          // 6b. CALL 2 (edit) — show all widgets, ask GPT which one to update
+          const r = await getOpenAI().chat.completions.create({
+            model: 'gpt-4o',
+            messages: [
+              { role: 'system', content: withKb(`You are an Elementor widget editor.
+Return JSON: { "widget_index": <number from the list>, "new_text": "replacement text", "what_changed": "brief description" }`, kbContext) },
+              { role: 'user', content: `Task: ${title}\n\nDetails: ${description}\n\nPage: "${elemPage.title?.rendered}"\n\nWidgets:\n${JSON.stringify(widgetSummary, null, 2).substring(0, 8000)}` }
+            ],
+            response_format: { type: 'json_object' }
+          });
+          elemResult = { action: 'edit', ...JSON.parse(r.choices[0].message.content) };
+        }
+
+        console.log(`🤖 GPT Elementor result:`, JSON.stringify(elemResult));
 
         // ════════════════════════════════════════════════════════════════
         // PATH A — EDIT: update a single widget field in-place
