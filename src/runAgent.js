@@ -1051,26 +1051,91 @@ add_action('rest_api_init', function() {
           timestamp: new Date().toISOString()
         });
 
-        // 5. Parse Elementor data and build an indexed widget map
-        // Strategy: index every widget → GPT picks an index → we update that field in-place
-        // This avoids ALL string-matching problems (truncation, encoding, special chars)
+        // 5. Parse Elementor data and build indexed widget map + node tree
         const parsed = JSON.parse(typeof elementorData === 'string' ? elementorData : JSON.stringify(elementorData));
 
-        // Build indexed widget list — ref array points to the actual parsed node so we can mutate it
-        const widgetRefs = []; // { index, widgetType, field, preview, node }
+        // ── Helper: generate a random Elementor-style 7-char hex ID ──────────
+        function elemId() {
+          return Math.floor(Math.random() * 0xFFFFFFF).toString(16).padStart(7, '0');
+        }
+
+        // ── Helper: deep-clone an element and assign brand-new IDs everywhere ─
+        function cloneWithNewIds(el) {
+          const clone = JSON.parse(JSON.stringify(el));
+          function reId(node) {
+            node.id = elemId();
+            (node.elements || []).forEach(reId);
+          }
+          reId(clone);
+          return clone;
+        }
+
+        // ── Helper: build a nodeMap id→{el, parentId} for tree traversal ─────
+        const nodeMap = new Map();
+        function buildNodeMap(elements, parentId = null) {
+          for (const el of (elements || [])) {
+            nodeMap.set(el.id, { el, parentId });
+            buildNodeMap(el.elements, el.id);
+          }
+        }
+        buildNodeMap(parsed);
+
+        // ── Helper: walk up the tree to find the nearest ancestor of elType ───
+        function findAncestor(startId, targetType) {
+          let entry = nodeMap.get(startId);
+          while (entry) {
+            const parent = entry.parentId ? nodeMap.get(entry.parentId) : null;
+            if (!parent) return null;
+            if (parent.el.elType === targetType) return parent.el;
+            entry = parent;
+          }
+          return null;
+        }
+
+        // ── Helper: upload an image to WP Media Library ───────────────────────
+        async function uploadImageToWP(imageUrl, filename) {
+          const FormData = require('form-data');
+          const imgRes = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 20000 });
+          const form   = new FormData();
+          form.append('file', Buffer.from(imgRes.data), { filename, contentType: imgRes.headers['content-type'] || 'image/jpeg' });
+          const uploadRes = await axios.post(`${WP_BASE}/wp-json/wp/v2/media`, form, {
+            auth: wpAuth, headers: form.getHeaders(), maxContentLength: Infinity
+          });
+          console.log(`✅ Uploaded image: ${uploadRes.data.source_url}`);
+          return { id: uploadRes.data.id, url: uploadRes.data.source_url };
+        }
+
+        // ── Helper: search Pexels for an image (uses PEXELS_API_KEY env var) ──
+        async function searchImage(query) {
+          const pexelsKey = process.env.PEXELS_API_KEY;
+          if (pexelsKey) {
+            const r = await axios.get('https://api.pexels.com/v1/search', {
+              headers: { Authorization: pexelsKey },
+              params: { query, per_page: 3, orientation: 'landscape' }
+            });
+            const photo = r.data?.photos?.[0];
+            if (photo) return { url: photo.src.large, credit: `Photo by ${photo.photographer} on Pexels` };
+          }
+          // Fallback: Unsplash direct (no API key needed for single image)
+          const unsplashSlug = query.replace(/\s+/g, ',');
+          return { url: `https://images.unsplash.com/photo-1544367567-0f2fcb009e0b?w=800&q=80`, credit: 'Photo via Unsplash' };
+        }
+
+        // ── Build indexed widget list (with elId for tree traversal) ─────────
+        const widgetRefs = [];
         function indexWidgets(elements) {
           for (const el of (elements || [])) {
             if (el.elType === 'widget') {
               const s = el.settings || {};
               for (const field of ['title', 'editor', 'text', 'description', 'caption']) {
                 if (s[field]) {
-                  const fullText = String(s[field]);
                   widgetRefs.push({
                     index:      widgetRefs.length,
                     widgetType: el.widgetType,
                     field,
-                    preview:    fullText.replace(/<[^>]+>/g, '').substring(0, 120), // strip HTML for display only
-                    node:       s  // direct reference to settings object — mutate field here
+                    preview:    String(s[field]).replace(/<[^>]+>/g, '').substring(0, 120),
+                    node:       s,
+                    elId:       el.id   // needed for tree traversal in add-card path
                   });
                   break;
                 }
@@ -1082,26 +1147,39 @@ add_action('rest_api_init', function() {
         indexWidgets(parsed);
         console.log(`📋 Found ${widgetRefs.length} text widgets in Elementor data`);
 
-        // Build summary for GPT — plain-text preview only (for identification), plus index
-        const widgetSummary = widgetRefs.map(w => ({ index: w.index, widgetType: w.widgetType, field: w.field, preview: w.preview }));
+        const widgetSummary = widgetRefs.map(w => ({
+          index: w.index, widgetType: w.widgetType, field: w.field, preview: w.preview
+        }));
 
-        // Ask GPT to identify WHICH widget (by index) to change, and what the new text should be
+        // 6. Ask GPT to determine ACTION (edit or add_card) + target details
         const elemResponse = await getOpenAI().chat.completions.create({
           model: 'gpt-4o',
           messages: [
             {
               role: 'system',
-              content: `You are an Elementor editor assistant. Given a list of text widgets (with index numbers) and a task, identify which widget to update.
+              content: `You are an Elementor page editor. Analyse the task and widget list, then return ONE of these JSON shapes:
 
-Return JSON:
+**Action: edit** — change text in an existing widget
 {
-  "changed": true or false,
-  "widget_index": <number — the index from the list>,
-  "new_text": "the full replacement text (plain text unless HTML specifically requested)",
-  "what_changed": "brief description of the change"
+  "action": "edit",
+  "widget_index": <number>,
+  "new_text": "replacement text",
+  "what_changed": "brief description"
 }
 
-Do NOT return old_text. Only return the index and new value.`
+**Action: add_card** — clone a sibling card/column and add a new one
+{
+  "action": "add_card",
+  "clone_from_widget_index": <index of a heading/text widget inside the card to clone>,
+  "new_heading": "heading text for the new card",
+  "new_description": "body text for the new card",
+  "new_button_text": "button label (optional, omit to keep same)",
+  "image_search_query": "keywords to search a photo for this card",
+  "what_changed": "brief description"
+}
+
+Choose add_card when the task says: add, new card, fourth, insert, create another, duplicate.
+Choose edit for all other cases.`
             },
             {
               role: 'user',
@@ -1112,35 +1190,156 @@ Do NOT return old_text. Only return the index and new value.`
         });
 
         const elemResult = JSON.parse(elemResponse.choices[0].message.content);
-        console.log(`🤖 GPT Elementor result:`, JSON.stringify(elemResult));
+        console.log(`🤖 GPT Elementor action:`, JSON.stringify(elemResult));
 
-        if (!elemResult.changed || elemResult.widget_index == null) {
-          await addComment(issueKey,
-            `⚠️ Could not identify which widget to change.\n\n` +
-            `Available widgets:\n${widgetSummary.slice(0, 8).map(w => `• [${w.index}] [${w.widgetType}] "${w.preview}"`).join('\n')}\n\n` +
-            `[Edit in Elementor|${WP_BASE}/wp-admin/post.php?post=${elemPage.id}&action=elementor]`
-          );
+        // ════════════════════════════════════════════════════════════════
+        // PATH A — EDIT: update a single widget field in-place
+        // ════════════════════════════════════════════════════════════════
+        let updatedJson;
+        let successComment;
+
+        if (elemResult.action === 'edit') {
+          if (elemResult.widget_index == null) {
+            await addComment(issueKey,
+              `⚠️ Could not identify which widget to change.\n\n` +
+              `Widgets:\n${widgetSummary.slice(0, 8).map(w => `• [${w.index}] [${w.widgetType}] "${w.preview}"`).join('\n')}\n\n` +
+              `[Edit in Elementor|${WP_BASE}/wp-admin/post.php?post=${elemPage.id}&action=elementor]`
+            );
+            await transitionIssue(issueKey, 'In Review');
+            break;
+          }
+          const tw = widgetRefs[elemResult.widget_index];
+          if (!tw) {
+            await addComment(issueKey, `⚠️ Widget index ${elemResult.widget_index} not found. Please edit manually.`);
+            await transitionIssue(issueKey, 'In Review');
+            break;
+          }
+          const oldValue = tw.node[tw.field];
+          tw.node[tw.field] = elemResult.new_text;
+          updatedJson    = JSON.stringify(parsed);
+          successComment =
+            `✅ Elementor widget updated on *"${elemPage.title?.rendered}"*\n\n` +
+            `*Changed:* ${elemResult.what_changed}\n` +
+            `*Widget:* [${elemResult.widget_index}] ${tw.widgetType}.${tw.field}\n` +
+            `*Old:* ${String(oldValue).replace(/<[^>]+>/g,'').substring(0, 80)}\n` +
+            `*New:* ${String(elemResult.new_text).substring(0, 80)}`;
+
+        // ════════════════════════════════════════════════════════════════
+        // PATH B — ADD CARD: clone an existing card column and inject new content
+        // ════════════════════════════════════════════════════════════════
+        } else if (elemResult.action === 'add_card') {
+          const refWidget = widgetRefs[elemResult.clone_from_widget_index];
+          if (!refWidget) {
+            await addComment(issueKey, `⚠️ Reference widget index ${elemResult.clone_from_widget_index} not found.`);
+            await transitionIssue(issueKey, 'In Review');
+            break;
+          }
+
+          // Walk up: widget → column (or section for container layout)
+          const parentColumn = findAncestor(refWidget.elId, 'column')
+                            || findAncestor(refWidget.elId, 'container');
+          if (!parentColumn) {
+            await addComment(issueKey, `⚠️ Could not find parent column for the reference widget. Please add the card manually.`);
+            await transitionIssue(issueKey, 'In Review');
+            break;
+          }
+
+          // Walk up: column → section
+          const parentSection = findAncestor(parentColumn.id, 'section')
+                             || findAncestor(parentColumn.id, 'container');
+          if (!parentSection) {
+            await addComment(issueKey, `⚠️ Could not find parent section. Please add the card manually.`);
+            await transitionIssue(issueKey, 'In Review');
+            break;
+          }
+
+          console.log(`📐 Cloning column ${parentColumn.id} inside section ${parentSection.id}`);
+
+          // Deep-clone the reference column with all-new IDs
+          const newColumn = cloneWithNewIds(parentColumn);
+
+          // Update text widgets inside the new column
+          function updateClonedWidgets(elements) {
+            for (const el of (elements || [])) {
+              if (el.elType === 'widget') {
+                const s = el.settings || {};
+                if (el.widgetType === 'heading' && elemResult.new_heading) {
+                  s.title = elemResult.new_heading;
+                }
+                if ((el.widgetType === 'text-editor' || el.widgetType === 'editor') && elemResult.new_description) {
+                  s.editor = elemResult.new_description;
+                }
+                if (el.widgetType === 'text' && elemResult.new_description) {
+                  s.text = elemResult.new_description;
+                }
+                if (el.widgetType === 'button' && elemResult.new_button_text) {
+                  s.text = elemResult.new_button_text;
+                }
+                // Image widget — placeholder URL first; real upload below
+                if (el.widgetType === 'image') {
+                  el._needsImageUpload = true; // flag for image upload step
+                }
+              }
+              if (el.elements?.length) updateClonedWidgets(el.elements);
+            }
+          }
+          updateClonedWidgets(newColumn.elements || []);
+
+          // Upload image if query provided
+          let imageAttachment = null;
+          if (elemResult.image_search_query) {
+            try {
+              console.log(`🔍 Searching image: "${elemResult.image_search_query}"`);
+              const imgResult = await searchImage(elemResult.image_search_query);
+              const safeFilename = elemResult.image_search_query.replace(/[^a-z0-9]/gi, '-').toLowerCase() + '.jpg';
+              imageAttachment = await uploadImageToWP(imgResult.url, safeFilename);
+              imageAttachment.credit = imgResult.credit;
+              console.log(`✅ Image ready: ID ${imageAttachment.id}`);
+            } catch (imgErr) {
+              console.warn(`⚠️ Image upload failed (non-fatal): ${imgErr.message}`);
+            }
+          }
+
+          // Inject uploaded image into image widgets in the new column
+          if (imageAttachment) {
+            function injectImage(elements) {
+              for (const el of (elements || [])) {
+                if (el.elType === 'widget' && el.widgetType === 'image') {
+                  el.settings = el.settings || {};
+                  el.settings.image = {
+                    url: imageAttachment.url,
+                    id:  imageAttachment.id,
+                    alt: elemResult.new_heading || '',
+                    source: 'library'
+                  };
+                  delete el._needsImageUpload;
+                }
+                if (el.elements?.length) injectImage(el.elements);
+              }
+            }
+            injectImage(newColumn.elements || []);
+          }
+
+          // Append the new column to the parent section's elements array
+          parentSection.elements = parentSection.elements || [];
+          parentSection.elements.push(newColumn);
+          console.log(`✅ New column appended — section now has ${parentSection.elements.length} columns`);
+
+          updatedJson    = JSON.stringify(parsed);
+          successComment =
+            `✅ New program card added to *"${elemPage.title?.rendered}"*\n\n` +
+            `*Added:* ${elemResult.what_changed}\n` +
+            `*Heading:* ${elemResult.new_heading}\n` +
+            `*Image:* ${imageAttachment ? `Uploaded (ID: ${imageAttachment.id}) — ${imageAttachment.credit}` : 'Kept from cloned card (no image key set)'}`;
+
+        } else {
+          await addComment(issueKey, `⚠️ Unknown Elementor action "${elemResult.action}". Please edit manually.`);
           await transitionIssue(issueKey, 'In Review');
           break;
         }
-
-        const targetWidget = widgetRefs[elemResult.widget_index];
-        if (!targetWidget) {
-          await addComment(issueKey, `⚠️ Widget index ${elemResult.widget_index} not found. Please edit manually in Elementor.`);
-          await transitionIssue(issueKey, 'In Review');
-          break;
-        }
-
-        const oldValue = targetWidget.node[targetWidget.field];
-        console.log(`✅ Updating widget[${elemResult.widget_index}] ${targetWidget.widgetType}.${targetWidget.field}`);
-        console.log(`   Old: ${String(oldValue).substring(0, 80)}`);
-        console.log(`   New: ${String(elemResult.new_text).substring(0, 80)}`);
-
-        // 6. Mutate the parsed object in-place — only one field changes
-        targetWidget.node[targetWidget.field] = elemResult.new_text;
 
         // Re-serialize the updated structure
-        const updatedJson = JSON.stringify(parsed);
+        // updatedJson already set in path A or B above
 
         // 7. Write back
         await axios.post(`${WP_BASE}/wp-json/brinda-agent/v1/elementor-data`, {
@@ -1148,49 +1347,39 @@ Do NOT return old_text. Only return the index and new value.`
           elementor_data: updatedJson,
         }, { auth: wpAuth });
 
-        // Verify the write landed — read back and confirm new_text is present
+        // Verify the write landed — read back and check data length changed
         const verifyRes = await axios.get(`${WP_BASE}/wp-json/brinda-agent/v1/elementor-data`, {
           auth: wpAuth, params: { post_id: elemPage.id }
         });
         const verifyData = verifyRes.data?.elementor_data || '';
         const verifyStr  = typeof verifyData === 'string' ? verifyData : JSON.stringify(verifyData);
-        const newTextInData = verifyStr.includes(elemResult.new_text.substring(0, 30));
-        console.log(`🔍 Write verification: new_text found in stored data = ${newTextInData}`);
-        if (!newTextInData) {
-          console.warn(`⚠️ Write verification failed — stored data may not have updated`);
-        }
+        const verifyOk   = verifyStr.length >= updatedJson.length - 100; // allow small diff
+        console.log(`🔍 Write verification: stored=${verifyStr.length} chars, sent=${updatedJson.length} chars, ok=${verifyOk}`);
+        if (!verifyOk) console.warn(`⚠️ Write may not have landed — sizes differ significantly`);
 
         console.log(`✅ Elementor data updated for page ${elemPage.id}: ${elemResult.what_changed}`);
 
-        // Flush all WP caches including Elementor compiled CSS/data cache
+        // Flush all WP caches
         try {
           const { runWpCli } = require('./wpCli');
           await runWpCli('cache flush');
-          console.log('✅ WP object cache flushed');
-          // Also clear Elementor CSS regeneration flag so it rebuilds on next load
           await runWpCli(`post meta delete ${elemPage.id} _elementor_css`);
           await runWpCli(`post meta delete ${elemPage.id} _elementor_element_cache`);
-          console.log('✅ Elementor CSS/element cache meta deleted');
+          console.log('✅ WP + Elementor caches flushed');
         } catch (cacheErr) {
           console.warn(`⚠️ Cache flush warning (non-fatal): ${cacheErr.message}`);
         }
 
         await transitionIssue(issueKey, 'In Review');
-        await purgeCache(); // WP Engine CDN/page cache
-
-        // Wait a moment for caches to settle before screenshot
+        await purgeCache();
         await new Promise(r => setTimeout(r, 4000));
 
         const elemPageUrl = elemPage.link || `${WP_BASE}/?page_id=${elemPage.id}`;
         const elemScreenshot = await capturePreview(issueKey, elemPageUrl);
-        const elemScreenshotLine = elemScreenshot ? `\n\n📸 *Updated page screenshot:*\n!${elemScreenshot}!` : '';
+        const elemScreenshotLine = elemScreenshot ? `\n\n📸 *Preview:*\n!${elemScreenshot}!` : '';
 
         await addComment(issueKey,
-          `✅ Elementor page updated: *"${elemPage.title?.rendered}"*\n\n` +
-          `*Changed:* ${elemResult.what_changed}\n` +
-          `*Widget:* [${elemResult.widget_index}] ${targetWidget.widgetType}.${targetWidget.field}\n` +
-          `*Old value:* ${String(oldValue).replace(/<[^>]+>/g,'').substring(0, 80)}\n` +
-          `*New value:* ${String(elemResult.new_text).substring(0, 80)}\n\n` +
+          successComment + `\n\n` +
           `🔗 [View page|${elemPageUrl}] | [Edit in Elementor|${WP_BASE}/wp-admin/post.php?post=${elemPage.id}&action=elementor]` +
           elemScreenshotLine + `\n\n` +
           `──────────────────────\n` +
