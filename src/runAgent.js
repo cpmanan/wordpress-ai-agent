@@ -1,3 +1,4 @@
+const axios  = require('axios');
 const OpenAI = require('openai');
 const { detectTaskType, TASK_TYPES } = require('./taskRouter');
 const { getIssue, addComment, setRevertMeta, transitionIssue, getRevertMeta, getIssueImages } = require('./jira');
@@ -631,7 +632,6 @@ Return JSON: {
 
       // ── SEO: Update Yoast SEO metadata via REST API ─────────────────
       case TASK_TYPES.SEO: {
-        const axios = require('axios');
         const WP_BASE = process.env.WP_STAGING_URL;
         const wpAuth  = { username: process.env.WP_USERNAME, password: process.env.WP_APP_PASSWORD };
 
@@ -2202,6 +2202,15 @@ async function redoTask(issueKey, feedback) {
     }
 
     const { postId, postType, savedContent } = meta;
+
+    // ── Elementor page redo: re-run agent with feedback injected ─────────────
+    // Elementor pages block direct WP REST content updates (403).
+    // Instead re-route through runAgent with the feedback as context.
+    if (meta.type === 'elementor') {
+      console.log(`⚡ Redo on Elementor page — re-routing through runAgent with feedback`);
+      await runAgent(issueKey, feedback, 'elementor');
+      return;
+    }
 
     // Get current state of the page (what agent last produced)
     const currentPage = postType === 'page'
