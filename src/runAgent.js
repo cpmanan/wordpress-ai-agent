@@ -1,6 +1,6 @@
 const OpenAI = require('openai');
 const { detectTaskType, TASK_TYPES } = require('./taskRouter');
-const { getIssue, addComment, setRevertMeta, transitionIssue, getRevertMeta } = require('./jira');
+const { getIssue, addComment, setRevertMeta, transitionIssue, getRevertMeta, getIssueImages } = require('./jira');
 const { cloneRepo, getCurrentSha, readFile, readAgentContext, editFile, commitAndDeploy, purgeCache, cleanup, pollPipelineUntilDone } = require('./wpEngineDeploy');
 const { getParentThemeContext } = require('./viharaContext');
 const { capturePreview } = require('./screenshotter');
@@ -1637,10 +1637,62 @@ Return JSON: { "clone_from_widget_index": <index from the list below>, "new_head
           const sectionReply = feedbackContext?.match(/^section:(\d+)$/i);
           const forcedWidgetIndex = sectionReply ? parseInt(sectionReply[1]) : null;
 
-          if (forcedWidgetIndex !== null) {
-            // User already answered the clarification — skip GPT, use forced index
-            console.log(`🎯 Using user-selected section index: ${forcedWidgetIndex}`);
-            elemResult = { action: 'edit', widget_index: forcedWidgetIndex, new_text: null, what_changed: 'User-selected section' };
+          // ── Image-based section targeting ─────────────────────────────────────
+          // If the ticket has image attachments, use GPT-4o Vision to identify
+          // which widget the screenshot corresponds to — no guessing needed.
+          let imageTargetIndex = null;
+          if (!forcedWidgetIndex) {
+            const attachedImages = await getIssueImages(issueKey).catch(() => []);
+            if (attachedImages.length > 0) {
+              console.log(`🖼️  Found ${attachedImages.length} image(s) in ticket — using Vision to identify target section`);
+              const img = attachedImages[0]; // use first image
+              try {
+                const visionRes = await getOpenAI().chat.completions.create({
+                  model: 'gpt-4o',
+                  messages: [
+                    {
+                      role: 'system',
+                      content:
+                        `You are identifying which Elementor widget matches a screenshot.\n` +
+                        `The user attached a screenshot of the section they want to edit.\n` +
+                        `Compare the image content against the widget text previews below and return the index of the best match.\n` +
+                        `Return JSON: { "widget_index": <number>, "confidence": "high|medium|low", "reason": "one sentence" }\n\n` +
+                        `Widgets:\n${widgetSummary.slice(0, 30).map(w =>
+                          `[${w.index}] ${w.widgetType} — "${w.preview}"`
+                        ).join('\n')}`
+                    },
+                    {
+                      role: 'user',
+                      content: [
+                        { type: 'text', text: `Task: ${title}\n\nWhich widget does this screenshot show?` },
+                        { type: 'image_url', image_url: { url: `data:${img.mimeType};base64,${img.base64}`, detail: 'low' } }
+                      ]
+                    }
+                  ],
+                  response_format: { type: 'json_object' },
+                  max_tokens: 200,
+                });
+                const visionResult = JSON.parse(visionRes.choices[0].message.content);
+                console.log(`🖼️  Vision result: index=${visionResult.widget_index}, confidence=${visionResult.confidence}, reason=${visionResult.reason}`);
+                if (visionResult.confidence !== 'low' && visionResult.widget_index != null) {
+                  imageTargetIndex = visionResult.widget_index;
+                  console.log(`✅ Image matched widget [${imageTargetIndex}]: "${widgetSummary[imageTargetIndex]?.preview?.substring(0, 60)}"`);
+                } else {
+                  console.log(`⚠️  Vision confidence too low — falling back to text matching`);
+                }
+              } catch (visionErr) {
+                console.warn(`⚠️  Vision analysis failed: ${visionErr.message}`);
+              }
+            }
+          }
+
+          const resolvedWidgetIndex = forcedWidgetIndex ?? imageTargetIndex;
+
+          if (resolvedWidgetIndex !== null) {
+            // Widget identified via image or user reply — skip GPT pick, go straight to content
+            const source = imageTargetIndex !== null && forcedWidgetIndex === null ? 'image' : 'user reply';
+            console.log(`🎯 Widget [${resolvedWidgetIndex}] identified via ${source}`);
+            elemResult = { action: 'edit', widget_index: resolvedWidgetIndex, new_text: null, what_changed: `Section identified via ${source}` };
           } else {
             // Score editable widgets against task keywords to detect ambiguity
             const taskWords = (title + ' ' + description).toLowerCase().split(/\W+/).filter(w => w.length > 3);

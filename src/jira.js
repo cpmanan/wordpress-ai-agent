@@ -117,4 +117,33 @@ async function appendToDescription(issueKey, extraText) {
   );
 }
 
-module.exports = { getIssue, addComment, setRevertMeta, getRevertMeta, transitionIssue, appendToDescription };
+// Download image attachments from a Jira issue
+// Returns array of { filename, mimeType, base64 } for image files only
+async function getIssueImages(issueKey) {
+  const issue = await getIssue(issueKey);
+  const attachments = issue.fields.attachment || [];
+  const images = attachments.filter(a => a.mimeType?.startsWith('image/'));
+  if (!images.length) return [];
+
+  const results = [];
+  for (const img of images) {
+    try {
+      const res = await axios.get(img.content, {
+        auth,
+        responseType: 'arraybuffer',
+        timeout: 15000
+      });
+      results.push({
+        filename: img.filename,
+        mimeType: img.mimeType,
+        base64:   Buffer.from(res.data).toString('base64'),
+      });
+      console.log(`📎 Downloaded attachment: ${img.filename} (${img.mimeType})`);
+    } catch (e) {
+      console.warn(`⚠️  Could not download attachment ${img.filename}: ${e.message}`);
+    }
+  }
+  return results;
+}
+
+module.exports = { getIssue, addComment, setRevertMeta, getRevertMeta, transitionIssue, appendToDescription, getIssueImages };
