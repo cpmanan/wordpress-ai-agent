@@ -267,56 +267,6 @@ async function revertTask(issueKey, commentOnKey) {
         break;
       }
 
-      // Events revert — trash the created event or note for manual update
-      case 'events': {
-        const { postId, action: eventAction } = meta;
-        const WP_BASE = process.env.WP_STAGING_URL;
-        const auth    = { username: process.env.WP_USERNAME, password: process.env.WP_APP_PASSWORD };
-
-        if (eventAction === 'create') {
-          // Delete the created event
-          await axios.delete(`${WP_BASE}/wp-json/wp/v2/tribe_events/${postId}`, {
-            auth, params: { force: true }
-          }).catch(e => console.warn(`Event delete warning: ${e.message}`));
-          await addComment(postTo,
-            `✅ Reverted *${issueKey}* — event #${postId} deleted\nOriginal state from: ${timestamp}`
-          );
-        } else {
-          await addComment(postTo,
-            `⚠️ Event *${issueKey}* was an update — cannot auto-restore previous data.\n\n` +
-            `[Edit Event|${WP_BASE}/wp-admin/post.php?post=${postId}&action=edit]`
-          );
-        }
-        await transitionIssue(postTo, 'Done').catch(() => {});
-        break;
-      }
-
-      // Donation form revert — restore title/description/goal
-      case 'donation': {
-        const { postId, savedState: donSaved } = meta;
-        const WP_BASE = process.env.WP_STAGING_URL;
-        const auth    = { username: process.env.WP_USERNAME, password: process.env.WP_APP_PASSWORD };
-
-        if (donSaved) {
-          const donRevert = {};
-          if (donSaved.title)   donRevert.title   = donSaved.title;
-          if (donSaved.content) donRevert.content = donSaved.content;
-          if (donSaved.goal)    donRevert.meta     = { _give_set_goal: donSaved.goal };
-          await axios.post(`${WP_BASE}/wp-json/wp/v2/give_forms/${postId}`, donRevert, { auth });
-          await addComment(postTo,
-            `✅ Reverted *${issueKey}* — donation form #${postId} restored to previous state\n` +
-            `Original state from: ${timestamp}`
-          );
-        } else {
-          await addComment(postTo,
-            `⚠️ No saved form state for *${issueKey}*.\n\n` +
-            `[Edit Form|${WP_BASE}/wp-admin/post.php?post=${postId}&action=edit]`
-          );
-        }
-        await transitionIssue(postTo, 'Done').catch(() => {});
-        break;
-      }
-
       default:
         await addComment(postTo, `⚠️ Unknown revert type "${type}" on *${issueKey}*. Please revert manually.`);
     }

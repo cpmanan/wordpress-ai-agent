@@ -7,8 +7,6 @@ const TASK_TYPES = {
   BACKUP:      'backup',      // Plugin/core updates with backup
   ELEMENTOR:   'elementor',   // Elementor page builder edits
   WOOCOMMERCE: 'woocommerce', // WooCommerce product edits
-  EVENTS:      'events',      // Tribe Events / mp-event CPT
-  DONATION:    'donation',    // Give donation forms
   REVERT:      'revert'       // Revert a previous change
 };
 
@@ -91,19 +89,6 @@ const WOOCOMMERCE_KEYWORDS = [
   'product page', 'shop page', 'cart', 'checkout',
 ];
 
-const EVENTS_KEYWORDS = [
-  'event', 'events', 'class schedule', 'schedule', 'workshop',
-  'add event', 'new event', 'create event', 'update event', 'edit event',
-  'tribe event', 'event date', 'event time', 'event location', 'event venue',
-  'upcoming event', 'yoga event', 'retreat', 'class event',
-];
-
-const DONATION_KEYWORDS = [
-  'donation', 'donate', 'give', 'giving', 'fundrais',
-  'donation form', 'donation goal', 'donation amount', 'campaign',
-  'charity', 'nonprofit', 'fund',
-];
-
 function detectTaskType(title, description = '') {
   const text = `${title} ${description}`.toLowerCase();
 
@@ -122,8 +107,6 @@ function detectTaskType(title, description = '') {
 
   // Domain-specific CPT types before generic content
   if (WOOCOMMERCE_KEYWORDS.some(k => text.includes(k)))  return TASK_TYPES.WOOCOMMERCE;
-  if (EVENTS_KEYWORDS.some(k => text.includes(k)))       return TASK_TYPES.EVENTS;
-  if (DONATION_KEYWORDS.some(k => text.includes(k)))     return TASK_TYPES.DONATION;
 
   // Nav before content — "create page and add to nav" should be NAV
   if (NAV_KEYWORDS.some(k => text.includes(k)))          return TASK_TYPES.NAV;
@@ -146,4 +129,4 @@ function detectTaskType(title, description = '') {
   return TASK_TYPES.CONTENT; // default
 }
 
-module.exports = { detectTaskType, TASK_TYPES, WOOCOMMERCE_KEYWORDS, EVENTS_KEYWORDS, DONATION_KEYWORDS };
+module.exports = { detectTaskType, TASK_TYPES, WOOCOMMERCE_KEYWORDS };
