@@ -54,18 +54,38 @@ async function revertTask(issueKey, commentOnKey) {
         break;
       }
 
-      // Elementor revert — restore _elementor_data to saved state
+      // Elementor revert — restore _elementor_data OR delete a CPT post
       case 'elementor': {
-        const { pageId, savedElementorData } = meta;
+        const { pageId, savedElementorData, cptPostId } = meta;
         const axiosLib = require('axios');
         const WP_BASE  = process.env.WP_STAGING_URL;
         const wpAuth   = { username: process.env.WP_USERNAME, password: process.env.WP_APP_PASSWORD };
-        await axiosLib.post(
-          `${WP_BASE}/wp-json/brinda-agent/v1/elementor-data`,
-          { post_id: pageId, elementor_data: savedElementorData },
-          { auth: wpAuth }
-        );
-        await addComment(postTo, `✅ Reverted *${issueKey}* — Elementor layout restored to original state`);
+
+        if (cptPostId) {
+          // CPT-backed add_card revert: delete the newly created post
+          try {
+            await axiosLib.delete(`${WP_BASE}/wp-json/wp/v2/posts/${cptPostId}`, {
+              auth: wpAuth, params: { force: true }
+            });
+          } catch {
+            // Try as 'pages' endpoint, or use WP CLI
+            try {
+              const { runWpCli } = require('./wpCli');
+              await runWpCli(`post delete ${cptPostId} --force`);
+            } catch (e2) {
+              console.warn(`Could not delete CPT post ${cptPostId}: ${e2.message}`);
+            }
+          }
+          await addComment(postTo, `✅ Reverted *${issueKey}* — new program card (ID: ${cptPostId}) deleted`);
+        } else {
+          // Standard Elementor JSON revert
+          await axiosLib.post(
+            `${WP_BASE}/wp-json/brinda-agent/v1/elementor-data`,
+            { post_id: pageId, elementor_data: savedElementorData },
+            { auth: wpAuth }
+          );
+          await addComment(postTo, `✅ Reverted *${issueKey}* — Elementor layout restored to original state`);
+        }
         await transitionIssue(postTo, 'Done').catch(() => {});
         break;
       }

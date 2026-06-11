@@ -1080,8 +1080,158 @@ add_action('rest_api_init', function() {
           timestamp: new Date().toISOString()
         });
 
-        // 5. Parse Elementor data and build indexed widget map + node tree
+        // 5. Parse Elementor data — detect CPT-backed shortcodes before widget indexing
         const parsed = JSON.parse(typeof elementorData === 'string' ? elementorData : JSON.stringify(elementorData));
+
+        // ── Detect trx_sc_services / trx_sc_courses / similar CPT shortcodes ──
+        // These widgets render from WordPress Custom Post Types (not from widget text).
+        // Adding a card = create a new CPT post in the same category, NOT edit Elementor JSON.
+        const cptWidgets = [];
+        const CPT_SHORTCODE_TYPES = ['trx_sc_services', 'trx_sc_courses', 'trx_sc_team', 'trx_sc_portfolio'];
+        function findCptWidgets(els) {
+          for (const el of (els || [])) {
+            if (el.elType === 'widget' && CPT_SHORTCODE_TYPES.includes(el.widgetType)) {
+              cptWidgets.push({ widgetType: el.widgetType, settings: el.settings || {} });
+            }
+            findCptWidgets(el.elements);
+          }
+        }
+        findCptWidgets(parsed);
+
+        // Check if this is an add_card task that targets a CPT-backed section
+        const isAddCardTask = /\b(add|new card|fourth|insert|create another|duplicate)\b/i.test(title + ' ' + description);
+        if (isAddCardTask && cptWidgets.length > 0) {
+          // ── PATH C: CPT-based add_card ────────────────────────────────────────
+          // The trx_sc_services widget pulls posts from a WP category — create a new post there
+          const targetWidget = cptWidgets[0];
+          const catId = targetWidget.settings.cat || targetWidget.settings.category || '';
+          // Map widget type to CPT post_type slug
+          const CPT_MAP = {
+            trx_sc_services:  'cpt_services',
+            trx_sc_courses:   'cpt_courses',
+            trx_sc_team:      'cpt_team',
+            trx_sc_portfolio: 'cpt_portfolio',
+          };
+          const cptType = CPT_MAP[targetWidget.widgetType] || 'cpt_services';
+
+          console.log(`📋 CPT-backed section detected: widget=${targetWidget.widgetType}, cpt=${cptType}, cat=${catId}`);
+
+          // Ask GPT for new card content
+          const cptCardRes = await getOpenAI().chat.completions.create({
+            model: 'gpt-4o',
+            messages: [
+              { role: 'system', content: withKb(`You are writing content for a new service/program card on a yoga studio website.
+Return JSON: {
+  "title": "card heading",
+  "excerpt": "short description shown on the card (1-2 sentences, plain text)",
+  "content": "full HTML body for the detail page",
+  "image_search_query": "keywords to find a relevant photo"
+}`, kbContext) },
+              { role: 'user', content: `Task: ${title}\n\nDetails: ${description}` }
+            ],
+            response_format: { type: 'json_object' }
+          });
+          const cardContent = JSON.parse(cptCardRes.choices[0].message.content);
+          console.log(`🤖 GPT CPT card: "${cardContent.title}"`);
+
+          // Upload image first
+          let featuredImageId = null;
+          if (cardContent.image_search_query) {
+            try {
+              console.log(`🔍 Searching image: "${cardContent.image_search_query}"`);
+              const imgResult  = await searchImage(cardContent.image_search_query);
+              const fname      = cardContent.image_search_query.replace(/[^a-z0-9]/gi, '-').toLowerCase() + '.jpg';
+              const attachment = await uploadImageToWP(imgResult.url, fname);
+              featuredImageId  = attachment.id;
+              console.log(`✅ Featured image uploaded: ID ${featuredImageId}`);
+            } catch (imgErr) {
+              console.warn(`⚠️ Image upload failed (non-fatal): ${imgErr.message}`);
+            }
+          }
+
+          // Create the CPT post via REST API
+          const newPostBody = {
+            title:   cardContent.title,
+            content: cardContent.content || '',
+            excerpt: cardContent.excerpt || '',
+            status:  'publish',
+            ...(catId ? { [`${cptType.replace('cpt_','')}_group`]: [parseInt(catId)] } : {}),
+            ...(featuredImageId ? { featured_media: featuredImageId } : {}),
+          };
+
+          // Try REST endpoint for CPT (WordPress auto-registers /wp/v2/<post_type>)
+          const cptSlug = cptType.replace('cpt_', '');
+          let newPost = null;
+          try {
+            const postRes = await axios.post(
+              `${WP_BASE}/wp-json/wp/v2/${cptSlug}s`, // e.g. /wp/v2/servicess — try plural
+              { ...newPostBody, [`${cptSlug}_group`]: catId ? [parseInt(catId)] : [] },
+              { auth: wpAuth }
+            );
+            newPost = postRes.data;
+          } catch {
+            try {
+              const postRes = await axios.post(
+                `${WP_BASE}/wp-json/wp/v2/${cptSlug}`, // try singular
+                newPostBody,
+                { auth: wpAuth }
+              );
+              newPost = postRes.data;
+            } catch (postErr) {
+              // Fall back to WP CLI
+              console.warn(`REST CPT post failed, trying WP CLI: ${postErr.message}`);
+              const { runWpCli } = require('./wpCli');
+              const titleEsc = cardContent.title.replace(/"/g, '\\"');
+              const excerptEsc = (cardContent.excerpt || '').replace(/"/g, '\\"');
+              const newId = await runWpCli(
+                `post create --post_type=${cptType} --post_status=publish --post_title="${titleEsc}" --post_excerpt="${excerptEsc}"${catId ? ` --post_category=${catId}` : ''} --porcelain`
+              );
+              if (featuredImageId) await runWpCli(`post meta update ${newId.trim()} _thumbnail_id ${featuredImageId}`);
+              // Assign to the correct taxonomy
+              if (catId) await runWpCli(`post term set ${newId.trim()} ${cptType}_group ${catId}`).catch(()=>{});
+              newPost = { id: parseInt(newId.trim()), link: `${WP_BASE}/?p=${newId.trim()}` };
+            }
+          }
+
+          console.log(`✅ New ${cptType} post created: ID ${newPost?.id} "${cardContent.title}"`);
+
+          // Save revert meta (delete post to undo)
+          await setRevertMeta(issueKey, {
+            type:       'elementor',
+            pageId:     elemPage.id,
+            savedElementorData: elementorData, // page itself unchanged
+            cptPostId:  newPost?.id,           // new post to delete on revert
+            timestamp:  new Date().toISOString(),
+          });
+
+          // Flush caches
+          try {
+            const { runWpCli } = require('./wpCli');
+            await runWpCli('cache flush');
+          } catch {}
+          await transitionIssue(issueKey, 'In Review');
+          await purgeCache();
+          await new Promise(r => setTimeout(r, 4000));
+
+          const pageUrl = elemPage.link || `${WP_BASE}/?page_id=${elemPage.id}`;
+          const screenshot = await capturePreview(issueKey, pageUrl);
+          const screenshotLine = screenshot ? `\n\n📸 *Preview:*\n!${screenshot}!` : '';
+
+          await addComment(issueKey,
+            `✅ New program card created for *"${elemPage.title?.rendered}"*\n\n` +
+            `*New post:* "${cardContent.title}" (ID: ${newPost?.id}, type: ${cptType})\n` +
+            `*Category:* ${catId} (same as existing cards)\n` +
+            `*Image:* ${featuredImageId ? `Uploaded (ID: ${featuredImageId})` : 'Not uploaded'}\n` +
+            `*Excerpt:* ${cardContent.excerpt}\n\n` +
+            `🔗 [View page|${pageUrl}] | [Edit in Elementor|${WP_BASE}/wp-admin/post.php?post=${elemPage.id}&action=elementor]` +
+            screenshotLine + `\n\n` +
+            `──────────────────────\n` +
+            `💬 Commands:\n` +
+            `• \`redo: <feedback>\` — adjust the content\n` +
+            `• \`revert\` — delete the new card`
+          );
+          break;
+        }
 
         // ── Helper: generate a random Elementor-style 7-char hex ID ──────────
         function elemId() {
