@@ -1,277 +1,173 @@
 /**
  * siteKnowledge.js
  *
- * Builds and caches a structured knowledge base of the WordPress site.
+ * Builds a structured knowledge base of the WordPress site via WP CLI over SSH.
+ * SSH connection is now confirmed working (Railway → WP Engine).
  *
- * Strategy: REST API first (no SSH needed), custom agent endpoint for
- * things the standard REST API doesn't expose (plugins, menus, theme,
- * site options). SSH/WP CLI is NOT used — Railway cannot reach WP Engine SSH.
- *
- * Sources:
- *   /wp-json/wp/v2/pages          → all pages
- *   /wp-json/wp/v2/posts          → recent posts
- *   /wp-json/wp/v2/menu-items     → navigation menu items
- *   /wp-json/wp/v2/menus          → menu list (WP 5.9+)
- *   /wp-json/brinda-agent/v1/site-info → plugins, theme, options (custom endpoint)
+ * Captures:
+ *   - All pages (ID, title, slug, status, template, Elementor flag)
+ *   - Navigation menus + items
+ *   - All plugins (active/inactive)
+ *   - Active theme (child + parent)
+ *   - Custom post types
+ *   - Site options (front page, blog page, site name, siteurl)
+ *   - Elementor-enabled pages
+ *   - Recent posts
  */
 
 const fs   = require('fs');
 const path = require('path');
-const axios = require('axios');
 
 const KNOWLEDGE_FILE = path.join(__dirname, '..', 'site-knowledge.json');
 
-function wpBase() { return process.env.WP_STAGING_URL; }
-function wpAuth() { return { username: process.env.WP_USERNAME, password: process.env.WP_APP_PASSWORD }; }
+// ── WP CLI helpers ────────────────────────────────────────────────────────────
 
-// ── REST API helpers ──────────────────────────────────────────────────────────
-
-async function restGet(path, params = {}) {
-  const res = await axios.get(`${wpBase()}/wp-json${path}`, {
-    auth:   wpAuth(),
-    params: { per_page: 100, ...params },
-    timeout: 15000,
-  });
-  return res.data;
-}
-
-/** GET all pages from a paginated REST endpoint */
-async function restGetAll(path, params = {}) {
-  const results = [];
-  let page = 1;
-  while (true) {
-    const res = await axios.get(`${wpBase()}/wp-json${path}`, {
-      auth:   wpAuth(),
-      params: { per_page: 100, page, ...params },
-      timeout: 15000,
-    });
-    results.push(...(res.data || []));
-    const total = parseInt(res.headers['x-wp-totalpages'] || '1');
-    if (page >= total) break;
-    page++;
-  }
-  return results;
-}
-
-// ── Site-info endpoint PHP (deployed to functions.php if not present) ─────────
-
-const SITE_INFO_MARKER = '// brinda-agent: site-info endpoint v1';
-const siteInfoEndpointPhp = `
-
-${SITE_INFO_MARKER}
-add_action('rest_api_init', function() {
-    register_rest_route('brinda-agent/v1', '/site-info', [
-        'methods'             => 'GET',
-        'permission_callback' => function() { return current_user_can('manage_options'); },
-        'callback'            => function() {
-            // Plugins
-            if (!function_exists('get_plugins')) {
-                require_once ABSPATH . 'wp-admin/includes/plugin.php';
-            }
-            $all_plugins    = get_plugins();
-            $active_plugins = get_option('active_plugins', []);
-            $plugins = [];
-            foreach ($all_plugins as $file => $data) {
-                $plugins[] = [
-                    'slug'    => dirname($file) ?: $file,
-                    'file'    => $file,
-                    'title'   => $data['Name'],
-                    'version' => $data['Version'],
-                    'status'  => in_array($file, $active_plugins) ? 'active' : 'inactive',
-                ];
-            }
-
-            // Theme
-            $theme = wp_get_theme();
-
-            // Menus
-            $nav_menus    = wp_get_nav_menus();
-            $menus_data   = [];
-            foreach ($nav_menus as $menu) {
-                $items = wp_get_nav_menu_items($menu->term_id);
-                $menu_items = [];
-                if ($items) {
-                    foreach ($items as $item) {
-                        $menu_items[] = [
-                            'id'        => $item->ID,
-                            'title'     => $item->title,
-                            'url'       => $item->url,
-                            'type'      => $item->object,
-                            'object_id' => intval($item->object_id),
-                            'parent_id' => intval($item->menu_item_parent),
-                        ];
-                    }
-                }
-                $menus_data[] = [
-                    'id'    => $menu->term_id,
-                    'name'  => $menu->name,
-                    'slug'  => $menu->slug,
-                    'items' => $menu_items,
-                ];
-            }
-
-            // Custom post types
-            $cpts = get_post_types(['public' => true, '_builtin' => false], 'objects');
-            $cpt_list = [];
-            foreach ($cpts as $cpt) {
-                $cpt_list[] = ['slug' => $cpt->name, 'label' => $cpt->label];
-            }
-
-            return [
-                'blogname'      => get_bloginfo('name'),
-                'siteurl'       => get_bloginfo('url'),
-                'front_page_id' => intval(get_option('page_on_front')),
-                'blog_page_id'  => intval(get_option('page_for_posts')),
-                'theme'  => [
-                    'child'  => $theme->get_stylesheet(),
-                    'parent' => $theme->get_template(),
-                    'name'   => $theme->get('Name'),
-                ],
-                'plugins'           => $plugins,
-                'menus'             => $menus_data,
-                'custom_post_types' => $cpt_list,
-            ];
-        },
-    ]);
-});
-`;
-
-// ── Deploy the site-info endpoint to functions.php if needed ──────────────────
-
-async function ensureSiteInfoEndpoint() {
-  const { cloneRepo, readFile, editFile, commitAndDeploy, pollPipelineUntilDone, purgeCache, cleanup } = require('./wpEngineDeploy');
-  const { cloneDir } = await cloneRepo();
+async function cliJson(runWpCli, cmd) {
   try {
-    const currentFunctions = readFile(cloneDir, 'functions.php') || '';
-    if (currentFunctions.includes(SITE_INFO_MARKER)) {
-      console.log('  ✅ Site-info endpoint already deployed');
-      return;
-    }
-    editFile(cloneDir, 'functions.php', currentFunctions.trimEnd() + '\n' + siteInfoEndpointPhp);
-    const { sha, noChanges } = await commitAndDeploy(cloneDir, '[AI Agent] Add brinda-agent site-info REST endpoint');
-    if (!noChanges) {
-      console.log('  ⏳ Deploying site-info endpoint via Bitbucket pipeline...');
-      await pollPipelineUntilDone(sha);
-      await purgeCache();
-      await new Promise(r => setTimeout(r, 5000)); // let WP bootstrap new code
-      console.log('  ✅ Site-info endpoint deployed');
-    }
-  } finally {
-    cleanup(cloneDir);
+    const out = await runWpCli(cmd + ' --format=json');
+    return JSON.parse(out || '[]');
+  } catch (e) {
+    console.warn(`  ⚠️  WP CLI "${cmd.substring(0, 60)}": ${e.message.split('\n')[0]}`);
+    return [];
+  }
+}
+
+async function cliVal(runWpCli, cmd) {
+  try {
+    return (await runWpCli(cmd)).trim();
+  } catch {
+    return '';
   }
 }
 
 // ── Main builder ──────────────────────────────────────────────────────────────
 
 async function buildKnowledge() {
-  console.log('🔍 Building site knowledge base via REST API...');
+  const { runWpCli } = require('./wpCli');
+  console.log('🔍 Building site knowledge base via SSH + WP CLI...');
 
-  const knowledge = {
-    generated_at:    new Date().toISOString(),
-    site:            {},
-    pages:           [],
-    posts:           [],
-    menus:           [],
-    plugins:         [],
-    theme:           {},
+  const kb = {
+    generated_at:      new Date().toISOString(),
+    site:              {},
+    pages:             [],
+    posts:             [],
+    menus:             [],
+    plugins:           [],
+    theme:             {},
     custom_post_types: [],
-    elementor_pages: [],
-    front_page_id:   null,
-    blog_page_id:    null,
+    elementor_pages:   [],
+    front_page_id:     null,
+    blog_page_id:      null,
   };
 
-  // ── Step 1: Ensure the site-info endpoint is deployed ─────────────────
-  try {
-    await ensureSiteInfoEndpoint();
-  } catch (e) {
-    console.warn(`  ⚠️ Could not deploy site-info endpoint: ${e.message}`);
-  }
+  // ── 1. Site options (parallel) ─────────────────────────────────────────
+  const [blogname, siteurl, frontPageId, blogPageId, template, stylesheet] = await Promise.all([
+    cliVal(runWpCli, 'option get blogname'),
+    cliVal(runWpCli, 'option get siteurl'),
+    cliVal(runWpCli, 'option get page_on_front'),
+    cliVal(runWpCli, 'option get page_for_posts'),
+    cliVal(runWpCli, 'option get template'),
+    cliVal(runWpCli, 'option get stylesheet'),
+  ]);
 
-  // ── Step 2: Fetch site info (plugins, menus, theme, options) via custom endpoint
-  try {
-    const info = await restGet('/brinda-agent/v1/site-info');
-    knowledge.site          = { blogname: info.blogname, siteurl: info.siteurl };
-    knowledge.front_page_id = info.front_page_id || null;
-    knowledge.blog_page_id  = info.blog_page_id  || null;
-    knowledge.theme         = info.theme          || {};
-    knowledge.menus         = info.menus          || [];
-    knowledge.custom_post_types = info.custom_post_types || [];
-    knowledge.plugins = (info.plugins || []).map(p => ({
-      slug:    p.slug,
-      title:   p.title,
-      status:  p.status,
-      version: p.version,
-    }));
-    const active = knowledge.plugins.filter(p => p.status === 'active');
-    console.log(`  ✅ Site: "${knowledge.site.blogname}" | Theme: ${knowledge.theme.child}`);
-    console.log(`  ✅ Plugins: ${knowledge.plugins.length} total, ${active.length} active`);
-    console.log(`  ✅ Menus: ${knowledge.menus.length} (${knowledge.menus.map(m => m.name).join(', ')})`);
-  } catch (e) {
-    console.warn(`  ⚠️ site-info endpoint not available yet: ${e.message}`);
-    // Fallback: read basic options via REST
-    try {
-      const settings = await restGet('/wp/v2/settings');
-      knowledge.site = { blogname: settings.title, siteurl: wpBase() };
-    } catch {}
-  }
+  kb.site          = { blogname, siteurl };
+  kb.front_page_id = parseInt(frontPageId) || null;
+  kb.blog_page_id  = parseInt(blogPageId)  || null;
+  kb.theme         = { child: stylesheet, parent: template };
+  console.log(`  ✅ Site: "${blogname}" (${siteurl})`);
+  console.log(`  ✅ Theme: child=${stylesheet}  parent=${template}`);
+  console.log(`  ✅ Front page ID: ${kb.front_page_id}`);
 
-  // ── Step 3: All pages via REST ─────────────────────────────────────────
-  try {
-    const pages = await restGetAll('/wp/v2/pages', { status: 'publish,draft', _fields: 'id,title,slug,status,template,meta,link' });
-    knowledge.pages = pages.map(p => ({
-      id:             p.id,
-      title:          p.title?.rendered || p.title?.raw || '',
-      slug:           p.slug,
-      status:         p.status,
-      template:       p.template || 'default',
-      link:           p.link,
-      uses_elementor: p.meta?._elementor_edit_mode === 'builder',
-      is_front_page:  p.id === knowledge.front_page_id,
-    }));
-    // Separately fetch Elementor pages (meta query)
-    try {
-      const elemPages = await restGetAll('/wp/v2/pages', {
-        status:     'publish,draft',
-        meta_key:   '_elementor_edit_mode',
-        meta_value: 'builder',
-        _fields:    'id,title,slug',
-      });
-      const elemIds = new Set(elemPages.map(p => p.id));
-      knowledge.elementor_pages = elemPages.map(p => ({
-        id: p.id, title: p.title?.rendered || '', slug: p.slug
-      }));
-      knowledge.pages.forEach(p => {
-        if (elemIds.has(p.id)) p.uses_elementor = true;
-      });
-    } catch {
-      // meta query may not be enabled — mark based on whatever meta came back
-    }
-    console.log(`  ✅ Pages: ${knowledge.pages.length} | Elementor: ${knowledge.elementor_pages.length}`);
-  } catch (e) {
-    console.warn(`  ⚠️ Could not fetch pages: ${e.message}`);
-  }
+  // ── 2. All pages ───────────────────────────────────────────────────────
+  const rawPages = await cliJson(runWpCli,
+    'post list --post_type=page --post_status=publish,draft --fields=ID,post_title,post_name,post_status,page_template --posts_per_page=-1'
+  );
+  kb.pages = rawPages.map(p => ({
+    id:       parseInt(p.ID),
+    title:    p.post_title,
+    slug:     p.post_name,
+    status:   p.post_status,
+    template: p.page_template || 'default',
+  }));
+  console.log(`  ✅ Pages: ${kb.pages.length}`);
 
-  // ── Step 4: Recent posts via REST ──────────────────────────────────────
-  try {
-    const posts = await restGetAll('/wp/v2/posts', { status: 'publish', per_page: 30, _fields: 'id,title,slug,date' });
-    knowledge.posts = posts.map(p => ({
-      id:    p.id,
-      title: p.title?.rendered || '',
-      slug:  p.slug,
-      date:  p.date,
-    }));
-    console.log(`  ✅ Posts: ${knowledge.posts.length} recent`);
-  } catch (e) {
-    console.warn(`  ⚠️ Could not fetch posts: ${e.message}`);
+  // ── 3. Elementor pages ─────────────────────────────────────────────────
+  const rawElem = await cliJson(runWpCli,
+    'post list --post_type=page --meta_key=_elementor_edit_mode --meta_value=builder --fields=ID,post_title,post_name --posts_per_page=-1'
+  );
+  kb.elementor_pages = rawElem.map(p => ({
+    id:    parseInt(p.ID),
+    title: p.post_title,
+    slug:  p.post_name,
+  }));
+  const elemIds = new Set(kb.elementor_pages.map(p => p.id));
+  kb.pages.forEach(p => {
+    p.uses_elementor = elemIds.has(p.id);
+    p.is_front_page  = p.id === kb.front_page_id;
+  });
+  console.log(`  ✅ Elementor pages: ${kb.elementor_pages.length}`);
+
+  // ── 4. Recent posts ────────────────────────────────────────────────────
+  const rawPosts = await cliJson(runWpCli,
+    'post list --post_type=post --post_status=publish --fields=ID,post_title,post_name,post_date --posts_per_page=30'
+  );
+  kb.posts = rawPosts.map(p => ({
+    id:    parseInt(p.ID),
+    title: p.post_title,
+    slug:  p.post_name,
+    date:  p.post_date,
+  }));
+  console.log(`  ✅ Posts: ${kb.posts.length} recent`);
+
+  // ── 5. Navigation menus ────────────────────────────────────────────────
+  const rawMenus = await cliJson(runWpCli, 'menu list --fields=term_id,name,slug,count');
+  kb.menus = [];
+  for (const menu of rawMenus) {
+    const items = await cliJson(runWpCli,
+      `menu item list "${menu.name}" --fields=ID,title,url,object,object_id,menu_item_parent`
+    );
+    kb.menus.push({
+      id:    parseInt(menu.term_id),
+      name:  menu.name,
+      slug:  menu.slug,
+      items: items.map(i => ({
+        id:        parseInt(i.ID),
+        title:     i.title,
+        url:       i.url,
+        type:      i.object,
+        object_id: parseInt(i.object_id),
+        parent_id: parseInt(i.menu_item_parent) || null,
+      })),
+    });
+  }
+  console.log(`  ✅ Menus: ${kb.menus.length} (${kb.menus.map(m => m.name).join(', ')})`);
+
+  // ── 6. Plugins ─────────────────────────────────────────────────────────
+  const rawPlugins = await cliJson(runWpCli, 'plugin list --fields=name,title,status,version');
+  kb.plugins = rawPlugins.map(p => ({
+    slug:    p.name,
+    title:   p.title,
+    status:  p.status,
+    version: p.version,
+  }));
+  const active = kb.plugins.filter(p => p.status === 'active');
+  console.log(`  ✅ Plugins: ${kb.plugins.length} total | Active: ${active.map(p => p.title).slice(0, 6).join(', ')}`);
+
+  // ── 7. Custom post types ───────────────────────────────────────────────
+  const rawCpts = await cliJson(runWpCli, 'post-type list --fields=name,label,public');
+  kb.custom_post_types = rawCpts
+    .filter(c => c.public === '1' && !['post', 'page', 'attachment'].includes(c.name))
+    .map(c => ({ slug: c.name, label: c.label }));
+  if (kb.custom_post_types.length) {
+    console.log(`  ✅ Custom post types: ${kb.custom_post_types.map(c => c.slug).join(', ')}`);
   }
 
   // ── Save ──────────────────────────────────────────────────────────────
-  fs.writeFileSync(KNOWLEDGE_FILE, JSON.stringify(knowledge, null, 2));
-  const activeCount = knowledge.plugins.filter(p => p.status === 'active').length;
+  fs.writeFileSync(KNOWLEDGE_FILE, JSON.stringify(kb, null, 2));
   console.log(`\n✅ Knowledge base saved → ${KNOWLEDGE_FILE}`);
-  console.log(`   Pages: ${knowledge.pages.length} | Menus: ${knowledge.menus.length} | Plugins active: ${activeCount}`);
+  console.log(`   Pages: ${kb.pages.length} | Elementor: ${kb.elementor_pages.length} | Menus: ${kb.menus.length} | Plugins active: ${active.length}`);
 
-  return knowledge;
+  return kb;
 }
 
 // ── Load cached knowledge ─────────────────────────────────────────────────────
@@ -285,19 +181,18 @@ function getKnowledge() {
   }
 }
 
-// ── Focused context string for GPT ───────────────────────────────────────────
+// ── Focused context string injected into every GPT system prompt ──────────────
 
 function getContextForTask(taskType, kb) {
   if (!kb) return '';
   const lines = [];
 
-  lines.push(`## WordPress Site Knowledge Base`);
+  lines.push('## WordPress Site Knowledge Base');
   lines.push(`Site: ${kb.site?.blogname} (${kb.site?.siteurl})`);
-  lines.push(`Front page ID: ${kb.front_page_id}`);
-  lines.push(`Snapshot date: ${kb.generated_at ? kb.generated_at.substring(0, 10) : 'unknown'}`);
+  lines.push(`Front page ID: ${kb.front_page_id} | Snapshot: ${(kb.generated_at || '').substring(0, 10)}`);
   lines.push('');
 
-  // Pages — always included (most useful context)
+  // Pages — always included
   lines.push(`### All Pages (${kb.pages?.length})`);
   (kb.pages || []).forEach(p => {
     const flags = [
@@ -305,46 +200,47 @@ function getContextForTask(taskType, kb) {
       p.uses_elementor ? '⚡ Elementor'  : '',
       p.status === 'draft' ? '📝 draft'  : '',
     ].filter(Boolean).join(' ');
-    lines.push(`  • ID ${p.id}: "${p.title}" /${p.slug}/ ${flags}`);
+    lines.push(`  • ID ${p.id}: "${p.title}" /${p.slug}/ ${flags}`.trimEnd());
   });
   lines.push('');
 
   // Menus
   if (['nav', 'content', 'elementor'].includes(taskType) && kb.menus?.length) {
-    lines.push(`### Navigation Menus`);
+    lines.push('### Navigation Menus');
     (kb.menus || []).forEach(m => {
       lines.push(`  Menu: "${m.name}" (ID ${m.id})`);
       (m.items || []).forEach(i => {
-        lines.push(`    - "${i.title}" → ${i.url} (type: ${i.type}, page_id: ${i.object_id})`);
+        lines.push(`    - "${i.title}" → ${i.url} (${i.type}, page_id: ${i.object_id})`);
       });
     });
     lines.push('');
   }
 
   // Active plugins
-  if (['plugin', 'backup', 'seo', 'elementor', 'file'].includes(taskType) && kb.plugins?.length) {
+  if (['plugin', 'backup', 'seo', 'elementor', 'file'].includes(taskType)) {
     const active = (kb.plugins || []).filter(p => p.status === 'active');
-    lines.push(`### Active Plugins (${active.length})`);
-    active.forEach(p => lines.push(`  • ${p.title} v${p.version} [${p.slug}]`));
-    lines.push('');
+    if (active.length) {
+      lines.push(`### Active Plugins (${active.length})`);
+      active.forEach(p => lines.push(`  • ${p.title} v${p.version} [${p.slug}]`));
+      lines.push('');
+    }
   }
 
-  // Elementor pages list (for elementor tasks)
+  // Elementor pages
   if (taskType === 'elementor' && kb.elementor_pages?.length) {
-    lines.push(`### Elementor Pages`);
+    lines.push('### Elementor Pages');
     (kb.elementor_pages || []).forEach(p => lines.push(`  • ID ${p.id}: "${p.title}" /${p.slug}/`));
     lines.push('');
   }
 
   // Custom post types
   if (kb.custom_post_types?.length) {
-    lines.push(`### Custom Post Types`);
+    lines.push('### Custom Post Types');
     kb.custom_post_types.forEach(c => lines.push(`  • ${c.slug}: ${c.label}`));
     lines.push('');
   }
 
-  // Theme
-  lines.push(`### Active Theme`);
+  lines.push('### Active Theme');
   lines.push(`  Child: ${kb.theme?.child}  |  Parent: ${kb.theme?.parent}`);
 
   return lines.join('\n');
@@ -355,8 +251,7 @@ function getContextForTask(taskType, kb) {
 function isStale(maxAgeHours = 24) {
   const kb = getKnowledge();
   if (!kb?.generated_at) return true;
-  const ageHours = (Date.now() - new Date(kb.generated_at).getTime()) / 3_600_000;
-  return ageHours > maxAgeHours;
+  return (Date.now() - new Date(kb.generated_at).getTime()) / 3_600_000 > maxAgeHours;
 }
 
 module.exports = { buildKnowledge, getKnowledge, getContextForTask, isStale };
