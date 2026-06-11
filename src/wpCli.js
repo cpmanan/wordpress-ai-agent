@@ -1,19 +1,15 @@
 const { NodeSSH } = require('node-ssh');
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
 
 let ssh = null;
 let connectingPromise = null; // mutex — prevents parallel connect races
 
-// Setup SSH key file from env var
-function setupSshKey() {
-  const keyPath = path.join(os.tmpdir(), 'wpengine_cli_key');
+// Parse the SSH private key from env var (handles Railway's \n escaping)
+function getPrivateKey() {
   const rawKey = process.env.SSH_PRIVATE_KEY || '';
-  // Handle escaped \n literals stored in Railway env vars
+  if (!rawKey) throw new Error('SSH_PRIVATE_KEY env var is not set');
+  // Railway stores multiline env vars with literal \n — convert back to real newlines
   const key = rawKey.includes('\\n') ? rawKey.replace(/\\n/g, '\n') : rawKey;
-  fs.writeFileSync(keyPath, key + '\n', { mode: 0o600 });
-  return keyPath;
+  return key.trim() + '\n';
 }
 
 // Check if the current ssh instance is alive
@@ -36,18 +32,18 @@ async function connect() {
 
   connectingPromise = (async () => {
     ssh = new NodeSSH();
-    const keyPath = setupSshKey();
-
+    const privateKey = getPrivateKey();
+    console.log(`🔑 Key format: ${privateKey.substring(0, 35).replace(/\n/g, '↵')}`);
     console.log(`🔌 Connecting SSH to ${process.env.WPENGINE_SSH_HOST} as ${process.env.WPENGINE_SSH_USER}`);
 
     try {
       await ssh.connect({
-        host:       process.env.WPENGINE_SSH_HOST,
-        username:   process.env.WPENGINE_SSH_USER,
-        privateKeyPath: keyPath,
-        port:       22,
+        host:        process.env.WPENGINE_SSH_HOST,
+        username:    process.env.WPENGINE_SSH_USER,
+        privateKey,               // pass key string directly — no temp file
+        port:        22,
         readyTimeout: 20000,
-        algorithms: { serverHostKey: ['ssh-ed25519', 'ecdsa-sha2-nistp256', 'ssh-rsa'] }
+        algorithms:  { serverHostKey: ['ssh-ed25519', 'ecdsa-sha2-nistp256', 'ssh-rsa'] }
       });
       console.log(`✅ SSH connected to ${process.env.WPENGINE_SSH_HOST}`);
     } catch (err) {
