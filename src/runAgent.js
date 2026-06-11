@@ -984,7 +984,41 @@ add_action('rest_api_init', function() {
 
           // Try slug/title search using knowledge base first (avoids REST round-trips)
           const taskText = (title + ' ' + description).toLowerCase();
-          if (siteKb?.elementor_pages?.length) {
+
+          // ── Priority 1: explicit page ID in description e.g. "page ID: 193" ──
+          const pageIdMatch = description.match(/page\s+id[:\s]+(\d+)/i);
+          if (pageIdMatch) {
+            const forcedId = parseInt(pageIdMatch[1]);
+            elemPage = await getPage(forcedId);
+            console.log(`🎯 Using explicit page ID from description: ${forcedId}`);
+          }
+
+          // ── Priority 2: URL in description — extract slug or post ID ──
+          // Handles: https://site.com/about-us/  OR  ?page_id=193  OR  post=193
+          if (!elemPage) {
+            const urlMatch = description.match(/https?:\/\/[^\s]+/i);
+            if (urlMatch) {
+              const url = urlMatch[0];
+              const postIdFromUrl = url.match(/[?&](?:page_id|p|post)=(\d+)/)?.[1]
+                                 || url.match(/post\.php\?post=(\d+)/)?.[1];
+              if (postIdFromUrl) {
+                elemPage = await getPage(parseInt(postIdFromUrl));
+                console.log(`🎯 Extracted page ID ${postIdFromUrl} from URL in description`);
+              } else {
+                // Extract slug from URL path e.g. /about-us/ → "about-us"
+                const slugFromUrl = url.replace(/[?#].*/, '').replace(/\/$/, '').split('/').pop();
+                if (slugFromUrl && slugFromUrl.length > 1) {
+                  const bySlug = await getPageBySlug(slugFromUrl);
+                  if (bySlug) {
+                    elemPage = bySlug;
+                    console.log(`🎯 Matched slug "${slugFromUrl}" from URL in description → page ID ${bySlug.id}`);
+                  }
+                }
+              }
+            }
+          }
+
+          if (siteKb?.elementor_pages?.length && !elemPage) {
             // Score each Elementor page by how many task words match its title
             // Skip auto-generated Elementor library titles like "Elementor Page #7402"
             const taskWords = taskText.split(/\W+/).filter(w => w.length > 2);
