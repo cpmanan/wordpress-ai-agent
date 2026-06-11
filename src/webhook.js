@@ -196,9 +196,25 @@ app.post('/webhook/jira', async (req, res) => {
         await addComment(issueKey, `📚 Rebuilding site knowledge base — scanning pages, menus, plugins...`);
         try {
           const kb = await buildKnowledge();
-          const activePlugins = (kb.plugins || []).filter(p => p.status === 'active').map(p => p.title);
-          const elemPages = (kb.elementor_pages || []).map(p => `• ID ${p.id}: "${p.title}"`).join('\n');
-          const menuSummary = (kb.menus || []).map(m => `• "${m.name}" (${m.items?.length} items)`).join('\n');
+          const activePlugins  = (kb.plugins || []).filter(p => p.status === 'active').map(p => p.title);
+          const elemPages      = (kb.elementor_pages || []).map(p => `• ID ${p.id}: "${p.title}"`).join('\n');
+          const menuSummary    = (kb.menus || []).map(m => `• "${m.name}" (${m.items?.length} items)`).join('\n');
+
+          // CPTs with taxonomy terms
+          const cptSummary = (kb.custom_post_types || []).map(c => {
+            const taxLines = (c.taxonomies || []).flatMap(tax =>
+              (tax.terms || []).map(t => `  └─ ${tax.slug} → "${t.name}" (id:${t.id}, ${t.count} posts)`)
+            );
+            return [`• ${c.slug}: ${c.label}`, ...taxLines].join('\n');
+          }).join('\n');
+
+          // Extended info summary
+          const customTables   = (kb.db_schema || []).filter(t => !t.is_core);
+          const pluginConfigs  = (kb.plugin_configs || []).map(p => `• ${p.name}: ${Object.keys(p.config||{}).join(', ')}`).join('\n');
+          const hasChildTheme  = !!kb.custom_code?.child_theme_functions;
+          const customPlugins  = (kb.custom_code?.custom_plugins || []).map(p => p.slug).join(', ');
+          const hooks          = (kb.custom_code?.registered_hooks || []).map(h => `add_${h[0]}(${h[1]})`).slice(0, 10).join(', ');
+
           await addComment(issueKey,
             `✅ Knowledge base updated!\n\n` +
             `*Site:* ${kb.site?.blogname}\n` +
@@ -207,8 +223,16 @@ app.post('/webhook/jira', async (req, res) => {
             `*Active plugins (${activePlugins.length}):*\n${activePlugins.map(p=>`• ${p}`).join('\n')}\n\n` +
             `*Menus:*\n${menuSummary}\n\n` +
             `*Elementor pages (${kb.elementor_pages?.length}):*\n${elemPages}\n\n` +
-            `*Custom post types:* ${(kb.custom_post_types||[]).map(c=>c.slug).join(', ') || 'none'}\n\n` +
-            `Agent will now use this knowledge for all future tasks.`
+            `*Custom post types + categories:*\n${cptSummary || 'none'}\n\n` +
+            `*Database:* ${kb.db_schema?.length || 0} total tables | ${customTables.length} custom/plugin tables\n` +
+            (customTables.length ? `${customTables.slice(0,6).map(t=>`• ${t.table}`).join('\n')}\n` : '') + `\n` +
+            `*Plugin configs stored:* ${kb.plugin_configs?.length || 0} plugins\n` +
+            (pluginConfigs ? `${pluginConfigs}\n` : '') + `\n` +
+            `*Custom code:*\n` +
+            `• Child theme functions.php: ${hasChildTheme ? `✅ (${kb.custom_code.child_theme_functions.lines} lines)` : '❌ not found'}\n` +
+            (customPlugins ? `• Custom plugins: ${customPlugins}\n` : '') +
+            (hooks ? `• Registered hooks: ${hooks}\n` : '') +
+            `\nAgent will now use this knowledge for all future tasks.`
           );
         } catch (kbErr) {
           await addComment(issueKey, `❌ Knowledge base rebuild failed: ${kbErr.message}`);
