@@ -1220,20 +1220,28 @@ Return JSON: {
           // ── Increment the widget's `count` in Elementor JSON so the new card shows ──
           // Find the matching trx_sc_* widget node in the parsed JSON and bump count by 1
           let updatedCountJson = null;
+          let countBumped = false;
           function bumpCount(elements) {
             for (const el of (elements || [])) {
               if (el.elType === 'widget' && el.widgetType === targetWidget.widgetType) {
                 const s = el.settings || {};
-                const currentCount = parseInt(s.count) || 0;
-                if (currentCount > 0) {
-                  s.count = String(currentCount + 1);
-                  console.log(`📈 Bumped ${el.widgetType} count: ${currentCount} → ${s.count}`);
+                // count may be stored as number OR string; treat missing/0 as unlimited (don't bump)
+                const raw = s.count;
+                const currentCount = parseInt(raw);
+                if (!isNaN(currentCount) && currentCount > 0) {
+                  const newCount = currentCount + 1;
+                  s.count = typeof raw === 'number' ? newCount : String(newCount);
+                  countBumped = true;
+                  console.log(`📈 Bumped ${el.widgetType} count: ${currentCount} → ${newCount} (type: ${typeof raw})`);
+                } else {
+                  console.log(`ℹ️  ${el.widgetType} count is "${raw}" — skipping bump (unlimited or zero)`);
                 }
               }
               bumpCount(el.elements);
             }
           }
           bumpCount(parsed);
+          console.log(`📊 Count bump result: ${countBumped ? 'updated' : 'no change needed'}`);
           updatedCountJson = JSON.stringify(parsed);
 
           // Write updated Elementor JSON (count change) back to the page

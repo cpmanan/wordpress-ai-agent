@@ -96,6 +96,16 @@ add_action('rest_api_init', function () {
   ]);
 
   // ══════════════════════════════════════════════════════════════════════════
+  // DELETE /wp-json/brinda-agent/v1/delete-post?post_id=123
+  // Works for any post type (CPT, post, page). Uses wp_delete_post() directly.
+  // ══════════════════════════════════════════════════════════════════════════
+  register_rest_route('brinda-agent/v1', '/delete-post', [
+    'methods'             => 'DELETE',
+    'callback'            => 'brinda_delete_post',
+    'permission_callback' => 'brinda_auth',
+  ]);
+
+  // ══════════════════════════════════════════════════════════════════════════
   // POST /wp-json/brinda-agent/v1/create-cpt-post
   // Body: { post_type, title, excerpt, content, cat_id, featured_media_id }
   // Creates a CPT post and assigns it to the correct taxonomy term.
@@ -171,7 +181,24 @@ function brinda_site_info() {
 
   $cpts = get_post_types(['public' => true, '_builtin' => false], 'objects');
   $custom_post_types = array_values(array_map(function($cpt) {
-    return ['slug' => $cpt->name, 'label' => $cpt->label];
+    // Include taxonomies and their terms so agent knows available categories
+    $taxonomies = get_object_taxonomies($cpt->name, 'objects');
+    $tax_info = [];
+    foreach ($taxonomies as $tax) {
+      $terms = get_terms(['taxonomy' => $tax->name, 'hide_empty' => false]);
+      $tax_info[] = [
+        'slug'  => $tax->name,
+        'label' => $tax->label,
+        'terms' => is_array($terms) ? array_map(function($t) {
+          return ['id' => $t->term_id, 'name' => $t->name, 'slug' => $t->slug, 'count' => $t->count];
+        }, $terms) : [],
+      ];
+    }
+    return [
+      'slug'       => $cpt->name,
+      'label'      => $cpt->label,
+      'taxonomies' => $tax_info,
+    ];
   }, $cpts));
 
   return rest_ensure_response([
@@ -233,6 +260,25 @@ function brinda_flush_cache(WP_REST_Request $request) {
   wp_cache_flush();
   if (function_exists('wpecommon_purge_varnish_cache_all')) wpecommon_purge_varnish_cache_all();
   return rest_ensure_response(['success' => true]);
+}
+
+// ── /delete-post DELETE ───────────────────────────────────────────────────
+function brinda_delete_post(WP_REST_Request $request) {
+  $post_id = (int) $request->get_param('post_id');
+  if (!$post_id) return new WP_Error('missing_param', 'post_id required', ['status' => 400]);
+
+  $post = get_post($post_id);
+  if (!$post) return new WP_Error('not_found', "Post {$post_id} not found", ['status' => 404]);
+
+  $result = wp_delete_post($post_id, true); // true = force delete, bypass trash
+  if (!$result) return new WP_Error('delete_failed', "Could not delete post {$post_id}", ['status' => 500]);
+
+  return rest_ensure_response([
+    'deleted' => true,
+    'post_id' => $post_id,
+    'post_type' => $post->post_type,
+    'title'   => $post->post_title,
+  ]);
 }
 
 // ── /create-cpt-post POST ─────────────────────────────────────────────────

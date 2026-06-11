@@ -140,10 +140,18 @@ function getContextForTask(taskType, kb) {
     lines.push('');
   }
 
-  // Custom post types
+  // Custom post types + their taxonomy categories
   if (kb.custom_post_types?.length) {
     lines.push('### Custom Post Types');
-    kb.custom_post_types.forEach(c => lines.push(`  • ${c.slug}: ${c.label}`));
+    kb.custom_post_types.forEach(c => {
+      lines.push(`  • ${c.slug}: ${c.label}`);
+      (c.taxonomies || []).forEach(tax => {
+        if (tax.terms?.length) {
+          const termList = tax.terms.map(t => `"${t.name}"(id:${t.id},count:${t.count})`).join(', ');
+          lines.push(`    └─ ${tax.slug}: ${termList}`);
+        }
+      });
+    });
     lines.push('');
   }
 

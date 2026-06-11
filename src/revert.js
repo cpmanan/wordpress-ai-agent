@@ -68,19 +68,15 @@ async function revertTask(issueKey, commentOnKey) {
           // 2. Restore original Elementor JSON (resets the count back)
           let postDeleted = false;
           try {
-            await axiosLib.delete(`${WP_BASE}/wp-json/wp/v2/posts/${cptPostId}`, {
-              auth: wpAuth, params: { force: true }
-            });
+            // Use brinda-agent endpoint — works for any post type via wp_delete_post()
+            await axiosLib.delete(
+              `${WP_BASE}/wp-json/brinda-agent/v1/delete-post`,
+              { headers: agentHdrs, params: { post_id: cptPostId } }
+            );
             postDeleted = true;
-            console.log(`✅ Deleted CPT post ${cptPostId}`);
-          } catch {
-            try {
-              const { runWpCli } = require('./wpCli');
-              await runWpCli(`post delete ${cptPostId} --force`);
-              postDeleted = true;
-            } catch (e2) {
-              console.warn(`Could not delete CPT post ${cptPostId}: ${e2.message}`);
-            }
+            console.log(`✅ Deleted CPT post ${cptPostId} via plugin`);
+          } catch (e1) {
+            console.warn(`Could not delete post ${cptPostId}: ${e1.response?.data?.message || e1.message}`);
           }
 
           // Restore original Elementor JSON (this resets the count display)
