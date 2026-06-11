@@ -28,7 +28,8 @@ function withKb(systemContent, kbCtx) {
 }
 
 async function runAgent(issueKey, feedbackContext = null, forcedTaskType = null) {
-  console.log(`\n🤖 Processing Jira issue: ${issueKey}`);
+  const isReroute = !!forcedTaskType; // skip duplicate comment/transition on re-routes
+  console.log(`\n🤖 Processing Jira issue: ${issueKey}${isReroute ? ` (re-route → ${forcedTaskType})` : ''}`);
 
   // 1. Fetch issue details
   const issue = await getIssue(issueKey);
@@ -39,9 +40,11 @@ async function runAgent(issueKey, feedbackContext = null, forcedTaskType = null)
 
   console.log(`📋 Task: ${title}`);
 
-  // 2. Move to In Progress
-  await transitionIssue(issueKey, 'In Progress');
-  await addComment(issueKey, `🤖 Agent started working on: "${title}"`);
+  // 2. Move to In Progress + post started comment (skip on re-route — already posted)
+  if (!isReroute) {
+    await transitionIssue(issueKey, 'In Progress');
+    await addComment(issueKey, `🤖 Agent started working on: "${title}"`);
+  }
 
   // 3. Detect task type (can be overridden when re-routing e.g. content → elementor)
   const taskType = forcedTaskType || detectTaskType(title, description);
@@ -331,7 +334,7 @@ Return JSON exactly like this:
           if (isElementor) {
             // Page is Elementor-built — re-run through ELEMENTOR path automatically
             console.log(`🔄 Page ${postId} uses Elementor — re-routing to ELEMENTOR handler`);
-            await runAgent(issueKey, 'elementor');
+            await runAgent(issueKey, null, 'elementor');
             return;
           }
 
