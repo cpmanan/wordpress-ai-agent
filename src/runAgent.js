@@ -964,7 +964,8 @@ add_action('rest_api_init', function() {
         }
 
         // 2. Ensure the custom Elementor endpoint is deployed in functions.php
-        const ELEMENTOR_ENDPOINT_MARKER = '// brinda-agent: Elementor endpoint v1';
+        // v2 marker — forces redeploy if only v1 was present
+        const ELEMENTOR_ENDPOINT_MARKER = '// brinda-agent: Elementor endpoint v2';
         const elementorEndpointPhp = `
 
 ${ELEMENTOR_ENDPOINT_MARKER}
@@ -986,11 +987,18 @@ add_action('rest_api_init', function() {
             $data = $req->get_param('elementor_data');
             if ($data !== null) {
                 update_post_meta($post_id, '_elementor_data', wp_slash($data));
-                // Clear Elementor CSS cache
+                // Clear ALL Elementor caches so front-end picks up the new data
                 delete_post_meta($post_id, '_elementor_css');
                 delete_post_meta($post_id, '_elementor_element_cache');
+                delete_post_meta($post_id, '_elementor_page_assets');
+                // Clear WP object cache
+                wp_cache_flush();
+                // Trigger Elementor CSS regeneration if plugin is active
+                if (class_exists('\\Elementor\\Plugin')) {
+                    \\Elementor\\Plugin::$instance->files_manager->clear_cache();
+                }
             }
-            return ['success' => true, 'post_id' => $post_id];
+            return ['success' => true, 'post_id' => $post_id, 'cache_cleared' => true];
         },
     ]);
 });
@@ -1140,10 +1148,38 @@ Do NOT return old_text. Only return the index and new value.`
           elementor_data: updatedJson,
         }, { auth: wpAuth });
 
+        // Verify the write landed — read back and confirm new_text is present
+        const verifyRes = await axios.get(`${WP_BASE}/wp-json/brinda-agent/v1/elementor-data`, {
+          auth: wpAuth, params: { post_id: elemPage.id }
+        });
+        const verifyData = verifyRes.data?.elementor_data || '';
+        const verifyStr  = typeof verifyData === 'string' ? verifyData : JSON.stringify(verifyData);
+        const newTextInData = verifyStr.includes(elemResult.new_text.substring(0, 30));
+        console.log(`🔍 Write verification: new_text found in stored data = ${newTextInData}`);
+        if (!newTextInData) {
+          console.warn(`⚠️ Write verification failed — stored data may not have updated`);
+        }
+
         console.log(`✅ Elementor data updated for page ${elemPage.id}: ${elemResult.what_changed}`);
 
+        // Flush all WP caches including Elementor compiled CSS/data cache
+        try {
+          const { runWpCli } = require('./wpCli');
+          await runWpCli('cache flush');
+          console.log('✅ WP object cache flushed');
+          // Also clear Elementor CSS regeneration flag so it rebuilds on next load
+          await runWpCli(`post meta delete ${elemPage.id} _elementor_css`);
+          await runWpCli(`post meta delete ${elemPage.id} _elementor_element_cache`);
+          console.log('✅ Elementor CSS/element cache meta deleted');
+        } catch (cacheErr) {
+          console.warn(`⚠️ Cache flush warning (non-fatal): ${cacheErr.message}`);
+        }
+
         await transitionIssue(issueKey, 'In Review');
-        await purgeCache();
+        await purgeCache(); // WP Engine CDN/page cache
+
+        // Wait a moment for caches to settle before screenshot
+        await new Promise(r => setTimeout(r, 4000));
 
         const elemPageUrl = elemPage.link || `${WP_BASE}/?page_id=${elemPage.id}`;
         const elemScreenshot = await capturePreview(issueKey, elemPageUrl);
@@ -1152,7 +1188,9 @@ Do NOT return old_text. Only return the index and new value.`
         await addComment(issueKey,
           `✅ Elementor page updated: *"${elemPage.title?.rendered}"*\n\n` +
           `*Changed:* ${elemResult.what_changed}\n` +
-          `*Widget type:* ${elemResult.widget_type}\n\n` +
+          `*Widget:* [${elemResult.widget_index}] ${targetWidget.widgetType}.${targetWidget.field}\n` +
+          `*Old value:* ${String(oldValue).replace(/<[^>]+>/g,'').substring(0, 80)}\n` +
+          `*New value:* ${String(elemResult.new_text).substring(0, 80)}\n\n` +
           `🔗 [View page|${elemPageUrl}] | [Edit in Elementor|${WP_BASE}/wp-admin/post.php?post=${elemPage.id}&action=elementor]` +
           elemScreenshotLine + `\n\n` +
           `──────────────────────\n` +
