@@ -112,9 +112,12 @@ function detectTaskType(title, description = '') {
   // Check most specific first
   if (BACKUP_KEYWORDS.some(k => text.includes(k)))       return TASK_TYPES.BACKUP;
 
-  // "update X plugin" — plugin name between "update" and "plugin" (e.g. "Update Contact Form 7 plugin")
+  // "update/upgrade X plugin" — plugin name between verb and "plugin"
   if (/\bupdate\b.{1,40}\bplugin\b/.test(text))          return TASK_TYPES.BACKUP;
   if (/\bupgrade\b.{1,40}\bplugin\b/.test(text))         return TASK_TYPES.BACKUP;
+
+  // "install/activate/deactivate/disable/enable/remove X plugin"
+  if (/\b(install|activate|deactivate|disable|enable|remove)\b.{0,40}\bplugin\b/.test(text)) return TASK_TYPES.PLUGIN;
   if (PLUGIN_KEYWORDS.some(k => text.includes(k)))       return TASK_TYPES.PLUGIN;
 
   // Domain-specific CPT types before generic content
