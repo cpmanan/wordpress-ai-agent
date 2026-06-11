@@ -57,9 +57,10 @@ async function revertTask(issueKey, commentOnKey) {
       // Elementor revert — restore _elementor_data OR delete a CPT post
       case 'elementor': {
         const { pageId, savedElementorData, cptPostId } = meta;
-        const axiosLib = require('axios');
-        const WP_BASE  = process.env.WP_STAGING_URL;
-        const wpAuth   = { username: process.env.WP_USERNAME, password: process.env.WP_APP_PASSWORD };
+        const axiosLib  = require('axios');
+        const WP_BASE   = process.env.WP_STAGING_URL;
+        const wpAuth    = { username: process.env.WP_USERNAME, password: process.env.WP_APP_PASSWORD };
+        const agentHdrs = { 'X-Agent-Token': process.env.AGENT_TOKEN || '' };
 
         if (cptPostId) {
           // CPT-backed add_card revert: delete the newly created post
@@ -82,7 +83,7 @@ async function revertTask(issueKey, commentOnKey) {
           await axiosLib.post(
             `${WP_BASE}/wp-json/brinda-agent/v1/elementor-data`,
             { post_id: pageId, elementor_data: savedElementorData },
-            { auth: wpAuth }
+            { headers: agentHdrs }
           );
           await addComment(postTo, `✅ Reverted *${issueKey}* — Elementor layout restored to original state`);
         }

@@ -966,9 +966,10 @@ add_action('rest_api_init', function() {
 
       // ── ELEMENTOR: Edit Elementor page builder content ───────────────
       case TASK_TYPES.ELEMENTOR: {
-        const axios  = require('axios');
-        const WP_BASE = process.env.WP_STAGING_URL;
-        const wpAuth  = { username: process.env.WP_USERNAME, password: process.env.WP_APP_PASSWORD };
+        const axios      = require('axios');
+        const WP_BASE    = process.env.WP_STAGING_URL;
+        const wpAuth     = { username: process.env.WP_USERNAME, password: process.env.WP_APP_PASSWORD };
+        const agentHdrs  = { 'X-Agent-Token': process.env.AGENT_TOKEN || '' };
 
         // 1. Find the target page — explicit page ID in description takes priority
         const elemIdMatch = (description).match(/page\s+id[:\s]+(\d+)/i);
@@ -1067,7 +1068,7 @@ add_action('rest_api_init', function() {
         let elementorData = null;
         try {
           const getRes = await axios.get(`${WP_BASE}/wp-json/brinda-agent/v1/elementor-data`, {
-            auth: wpAuth, params: { post_id: elemPage.id }
+            headers: agentHdrs, params: { post_id: elemPage.id }
           });
           elementorData = getRes.data?.elementor_data;
           console.log(`✅ Read Elementor data for page ${elemPage.id} (${typeof elementorData === 'string' ? elementorData.length : 0} chars)`);
@@ -1613,11 +1614,11 @@ Return JSON: { "widget_index": <number from the list>, "new_text": "replacement 
         await axios.post(`${WP_BASE}/wp-json/brinda-agent/v1/elementor-data`, {
           post_id:        elemPage.id,
           elementor_data: updatedJson,
-        }, { auth: wpAuth });
+        }, { headers: agentHdrs });
 
         // Verify the write landed — read back and check data length changed
         const verifyRes = await axios.get(`${WP_BASE}/wp-json/brinda-agent/v1/elementor-data`, {
-          auth: wpAuth, params: { post_id: elemPage.id }
+          headers: agentHdrs, params: { post_id: elemPage.id }
         });
         const verifyData = verifyRes.data?.elementor_data || '';
         const verifyStr  = typeof verifyData === 'string' ? verifyData : JSON.stringify(verifyData);
