@@ -1122,22 +1122,81 @@ add_action('rest_api_init', function() {
         }
 
         // ── Build indexed widget list (with elId for tree traversal) ─────────
+        // Handles both standard Elementor widgets AND ThemeREX trx_sc_* widgets
+        // that store multiple cards as an `items` array inside one widget.
         const widgetRefs = [];
+        const TOP_FIELDS  = ['title', 'editor', 'text', 'description', 'caption', 'subtitle', 'content'];
+        const ITEM_FIELDS = ['title', 'description', 'text', 'subtitle', 'content', 'name'];
+
         function indexWidgets(elements) {
           for (const el of (elements || [])) {
             if (el.elType === 'widget') {
               const s = el.settings || {};
-              for (const field of ['title', 'editor', 'text', 'description', 'caption']) {
-                if (s[field]) {
-                  widgetRefs.push({
-                    index:      widgetRefs.length,
-                    widgetType: el.widgetType,
-                    field,
-                    preview:    String(s[field]).replace(/<[^>]+>/g, '').substring(0, 120),
-                    node:       s,
-                    elId:       el.id   // needed for tree traversal in add-card path
-                  });
-                  break;
+
+              // A) ThemeREX / custom widgets that store cards as items[]
+              //    e.g. trx_sc_services, trx_sc_columns, trx_sc_courses
+              if (Array.isArray(s.items) && s.items.length > 0) {
+                s.items.forEach((item, itemIdx) => {
+                  for (const field of ITEM_FIELDS) {
+                    if (item[field]) {
+                      widgetRefs.push({
+                        index:      widgetRefs.length,
+                        widgetType: `${el.widgetType}[item ${itemIdx}]`,
+                        field,
+                        preview:    String(item[field]).replace(/<[^>]+>/g, '').substring(0, 120),
+                        node:       item,   // mutate item directly
+                        elId:       el.id,
+                        isItem:     true,
+                        itemsArray: s.items,  // reference to parent items array (for add_card)
+                        itemIndex:  itemIdx,
+                        parentSettings: s
+                      });
+                      break;
+                    }
+                  }
+                  // Also expose image field of each item so GPT can reference it
+                  if (item.image || item.bg_image) {
+                    const imgField = item.image ? 'image' : 'bg_image';
+                    widgetRefs.push({
+                      index:      widgetRefs.length,
+                      widgetType: `${el.widgetType}[item ${itemIdx} image]`,
+                      field:      imgField,
+                      preview:    `[image: ${String(item[imgField]).substring(0, 60)}]`,
+                      node:       item,
+                      elId:       el.id,
+                      isItem:     true,
+                      isImage:    true,
+                      itemsArray: s.items,
+                      itemIndex:  itemIdx,
+                      parentSettings: s
+                    });
+                  }
+                });
+                // Also index the widget-level title/description if present
+                for (const field of TOP_FIELDS) {
+                  if (s[field]) {
+                    widgetRefs.push({
+                      index: widgetRefs.length, widgetType: el.widgetType, field,
+                      preview: String(s[field]).replace(/<[^>]+>/g,'').substring(0,120),
+                      node: s, elId: el.id
+                    });
+                    break;
+                  }
+                }
+                // B) Standard Elementor widgets (heading, text-editor, button, image, etc.)
+              } else {
+                for (const field of TOP_FIELDS) {
+                  if (s[field]) {
+                    widgetRefs.push({
+                      index:      widgetRefs.length,
+                      widgetType: el.widgetType,
+                      field,
+                      preview:    String(s[field]).replace(/<[^>]+>/g, '').substring(0, 120),
+                      node:       s,
+                      elId:       el.id
+                    });
+                    break;
+                  }
                 }
               }
             }
@@ -1145,7 +1204,7 @@ add_action('rest_api_init', function() {
           }
         }
         indexWidgets(parsed);
-        console.log(`📋 Found ${widgetRefs.length} text widgets in Elementor data`);
+        console.log(`📋 Found ${widgetRefs.length} text/item widgets in Elementor data`);
 
         const widgetSummary = widgetRefs.map(w => ({
           index: w.index, widgetType: w.widgetType, field: w.field, preview: w.preview
@@ -1157,24 +1216,28 @@ add_action('rest_api_init', function() {
           messages: [
             {
               role: 'system',
-              content: `You are an Elementor page editor. Analyse the task and widget list, then return ONE of these JSON shapes:
+              content: `You are an Elementor page editor. The widget list may contain:
+- Standard widgets (heading, text-editor, button, image)
+- ThemeREX widgets with items arrays — shown as "trx_sc_*[item N]" — these are sub-cards inside a single widget
 
-**Action: edit** — change text in an existing widget
+Analyse the task and return ONE of these JSON shapes:
+
+**Action: edit** — change text in an existing widget or item
 {
   "action": "edit",
-  "widget_index": <number>,
+  "widget_index": <number from the list>,
   "new_text": "replacement text",
   "what_changed": "brief description"
 }
 
-**Action: add_card** — clone a sibling card/column and add a new one
+**Action: add_card** — add a new card to a group (items array or column-based section)
 {
   "action": "add_card",
-  "clone_from_widget_index": <index of a heading/text widget inside the card to clone>,
+  "clone_from_widget_index": <index of a title/heading widget from the SAME card group to clone — pick the first item in that group>,
   "new_heading": "heading text for the new card",
   "new_description": "body text for the new card",
-  "new_button_text": "button label (optional, omit to keep same)",
-  "image_search_query": "keywords to search a photo for this card",
+  "new_button_text": "button label (optional)",
+  "image_search_query": "keywords to find a photo for this card",
   "what_changed": "brief description"
 }
 
@@ -1183,7 +1246,7 @@ Choose edit for all other cases.`
             },
             {
               role: 'user',
-              content: `Task: ${title}\n\nDetails: ${description}\n\nPage: "${elemPage.title?.rendered}"\n\nWidgets:\n${JSON.stringify(widgetSummary, null, 2).substring(0, 6000)}`
+              content: `Task: ${title}\n\nDetails: ${description}\n\nPage: "${elemPage.title?.rendered}"\n\nWidgets:\n${JSON.stringify(widgetSummary, null, 2).substring(0, 8000)}`
             }
           ],
           response_format: { type: 'json_object' }
@@ -1225,7 +1288,9 @@ Choose edit for all other cases.`
             `*New:* ${String(elemResult.new_text).substring(0, 80)}`;
 
         // ════════════════════════════════════════════════════════════════
-        // PATH B — ADD CARD: clone an existing card column and inject new content
+        // PATH B — ADD CARD
+        // B1: ThemeREX items[] — all cards in one widget's settings.items
+        // B2: Column-based — each card is its own Elementor column
         // ════════════════════════════════════════════════════════════════
         } else if (elemResult.action === 'add_card') {
           const refWidget = widgetRefs[elemResult.clone_from_widget_index];
@@ -1235,102 +1300,81 @@ Choose edit for all other cases.`
             break;
           }
 
-          // Walk up: widget → column (or section for container layout)
-          const parentColumn = findAncestor(refWidget.elId, 'column')
-                            || findAncestor(refWidget.elId, 'container');
-          if (!parentColumn) {
-            await addComment(issueKey, `⚠️ Could not find parent column for the reference widget. Please add the card manually.`);
-            await transitionIssue(issueKey, 'In Review');
-            break;
-          }
-
-          // Walk up: column → section
-          const parentSection = findAncestor(parentColumn.id, 'section')
-                             || findAncestor(parentColumn.id, 'container');
-          if (!parentSection) {
-            await addComment(issueKey, `⚠️ Could not find parent section. Please add the card manually.`);
-            await transitionIssue(issueKey, 'In Review');
-            break;
-          }
-
-          console.log(`📐 Cloning column ${parentColumn.id} inside section ${parentSection.id}`);
-
-          // Deep-clone the reference column with all-new IDs
-          const newColumn = cloneWithNewIds(parentColumn);
-
-          // Update text widgets inside the new column
-          function updateClonedWidgets(elements) {
-            for (const el of (elements || [])) {
-              if (el.elType === 'widget') {
-                const s = el.settings || {};
-                if (el.widgetType === 'heading' && elemResult.new_heading) {
-                  s.title = elemResult.new_heading;
-                }
-                if ((el.widgetType === 'text-editor' || el.widgetType === 'editor') && elemResult.new_description) {
-                  s.editor = elemResult.new_description;
-                }
-                if (el.widgetType === 'text' && elemResult.new_description) {
-                  s.text = elemResult.new_description;
-                }
-                if (el.widgetType === 'button' && elemResult.new_button_text) {
-                  s.text = elemResult.new_button_text;
-                }
-                // Image widget — placeholder URL first; real upload below
-                if (el.widgetType === 'image') {
-                  el._needsImageUpload = true; // flag for image upload step
-                }
-              }
-              if (el.elements?.length) updateClonedWidgets(el.elements);
-            }
-          }
-          updateClonedWidgets(newColumn.elements || []);
-
-          // Upload image if query provided
+          // Upload image first (shared between both paths)
           let imageAttachment = null;
           if (elemResult.image_search_query) {
             try {
               console.log(`🔍 Searching image: "${elemResult.image_search_query}"`);
-              const imgResult = await searchImage(elemResult.image_search_query);
-              const safeFilename = elemResult.image_search_query.replace(/[^a-z0-9]/gi, '-').toLowerCase() + '.jpg';
-              imageAttachment = await uploadImageToWP(imgResult.url, safeFilename);
+              const imgResult   = await searchImage(elemResult.image_search_query);
+              const safeFilename = elemResult.image_search_query.replace(/[^a-z0-9]/gi,'-').toLowerCase() + '.jpg';
+              imageAttachment   = await uploadImageToWP(imgResult.url, safeFilename);
               imageAttachment.credit = imgResult.credit;
-              console.log(`✅ Image ready: ID ${imageAttachment.id}`);
+              console.log(`✅ Image uploaded: ID ${imageAttachment.id}`);
             } catch (imgErr) {
               console.warn(`⚠️ Image upload failed (non-fatal): ${imgErr.message}`);
             }
           }
 
-          // Inject uploaded image into image widgets in the new column
-          if (imageAttachment) {
-            function injectImage(elements) {
+          // ── B1: ThemeREX items[] pattern ──────────────────────────────
+          if (refWidget.isItem && refWidget.itemsArray) {
+            const itemsArray = refWidget.itemsArray;
+            const clonedItem = JSON.parse(JSON.stringify(itemsArray[refWidget.itemIndex]));
+            if (elemResult.new_heading)     { clonedItem.title       = elemResult.new_heading; }
+            if (elemResult.new_description) { clonedItem.description = elemResult.new_description;
+                                              clonedItem.text        = elemResult.new_description; }
+            if (elemResult.new_button_text) { clonedItem.link_text   = elemResult.new_button_text; }
+            if (imageAttachment) {
+              if ('image'    in clonedItem) clonedItem.image    = imageAttachment.url;
+              if ('bg_image' in clonedItem) clonedItem.bg_image = imageAttachment.url;
+            }
+            itemsArray.push(clonedItem);
+            console.log(`✅ TRX items[] card added — array now has ${itemsArray.length} items`);
+
+          // ── B2: Column-based layout ───────────────────────────────────
+          } else {
+            const parentColumn = findAncestor(refWidget.elId, 'column')
+                              || findAncestor(refWidget.elId, 'container');
+            if (!parentColumn) {
+              await addComment(issueKey, `⚠️ Could not find parent column. Please add the card manually.`);
+              await transitionIssue(issueKey, 'In Review');
+              break;
+            }
+            const parentSection = findAncestor(parentColumn.id, 'section')
+                               || findAncestor(parentColumn.id, 'container');
+            if (!parentSection) {
+              await addComment(issueKey, `⚠️ Could not find parent section. Please add the card manually.`);
+              await transitionIssue(issueKey, 'In Review');
+              break;
+            }
+            console.log(`📐 Cloning column ${parentColumn.id} in section ${parentSection.id}`);
+            const newColumn = cloneWithNewIds(parentColumn);
+            function updateClonedWidgets(elements) {
               for (const el of (elements || [])) {
-                if (el.elType === 'widget' && el.widgetType === 'image') {
-                  el.settings = el.settings || {};
-                  el.settings.image = {
-                    url: imageAttachment.url,
-                    id:  imageAttachment.id,
-                    alt: elemResult.new_heading || '',
-                    source: 'library'
-                  };
-                  delete el._needsImageUpload;
+                if (el.elType === 'widget') {
+                  const s = el.settings || {};
+                  if (el.widgetType === 'heading'     && elemResult.new_heading)     s.title  = elemResult.new_heading;
+                  if (el.widgetType === 'text-editor' && elemResult.new_description) s.editor = elemResult.new_description;
+                  if (el.widgetType === 'text'        && elemResult.new_description) s.text   = elemResult.new_description;
+                  if (el.widgetType === 'button'      && elemResult.new_button_text) s.text   = elemResult.new_button_text;
+                  if (el.widgetType === 'image' && imageAttachment) {
+                    s.image = { url: imageAttachment.url, id: imageAttachment.id, alt: elemResult.new_heading || '', source: 'library' };
+                  }
                 }
-                if (el.elements?.length) injectImage(el.elements);
+                if (el.elements?.length) updateClonedWidgets(el.elements);
               }
             }
-            injectImage(newColumn.elements || []);
+            updateClonedWidgets(newColumn.elements || []);
+            parentSection.elements = parentSection.elements || [];
+            parentSection.elements.push(newColumn);
+            console.log(`✅ New column appended — section now has ${parentSection.elements.length} columns`);
           }
-
-          // Append the new column to the parent section's elements array
-          parentSection.elements = parentSection.elements || [];
-          parentSection.elements.push(newColumn);
-          console.log(`✅ New column appended — section now has ${parentSection.elements.length} columns`);
 
           updatedJson    = JSON.stringify(parsed);
           successComment =
             `✅ New program card added to *"${elemPage.title?.rendered}"*\n\n` +
             `*Added:* ${elemResult.what_changed}\n` +
             `*Heading:* ${elemResult.new_heading}\n` +
-            `*Image:* ${imageAttachment ? `Uploaded (ID: ${imageAttachment.id}) — ${imageAttachment.credit}` : 'Kept from cloned card (no image key set)'}`;
+            `*Image:* ${imageAttachment ? `Uploaded (ID: ${imageAttachment.id}) — ${imageAttachment.credit}` : 'Kept from cloned card (no PEXELS_API_KEY set)'}`;
 
         } else {
           await addComment(issueKey, `⚠️ Unknown Elementor action "${elemResult.action}". Please edit manually.`);
