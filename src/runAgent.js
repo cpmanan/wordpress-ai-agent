@@ -1236,7 +1236,13 @@ add_action('rest_api_init', function() {
         console.log(`📋 Found ${widgetRefs.length} text/item widgets in Elementor data`);
 
         const widgetSummary = widgetRefs.map(w => ({
-          index: w.index, widgetType: w.widgetType, field: w.field, preview: w.preview
+          index:      w.index,
+          widgetType: w.widgetType,
+          field:      w.field,
+          preview:    w.preview,
+          // isItem=true means this is a sub-card inside a widget's items[] array
+          // For add_card, clone_from_widget_index MUST point to an isItem=true entry
+          isItem:     w.isItem || false,
         }));
 
         // 6. Ask GPT to determine ACTION (edit or add_card) + target details
