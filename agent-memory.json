@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "last_updated": "2026-06-11T14:36:58.499Z",
+  "page_mappings": {
+    "home homepage front page programs": {
+      "id": 2360,
+      "title": "Home 6",
+      "slug": "home-6",
+      "confirmed_by": "BRIN-53",
+      "date": "2026-06-11T14:36:58.493Z"
+    },
+    "buy classes yoga class": {
+      "id": 18,
+      "title": "Buy Classes",
+      "slug": "buy-classes",
+      "confirmed_by": "BRIN-54",
+      "date": "2026-06-11T14:36:58.498Z"
+    }
+  },
+  "widget_learnings": [
+    {
+      "widget_type": "trx_sc_services",
+      "field_name": "count",
+      "note": "ThemeREX stores post limit as \"count\" (confirmed via elementor_controls_usage in DB). Default value 3 is NOT written to JSON — must explicitly set count=N when adding posts.",
+      "learned_from": "BRIN-53",
+      "date": "2026-06-11T14:36:58.498Z"
+    },
+    {
+      "widget_type": "trx_sc_services",
+      "field_name": "cat",
+      "note": "Category ID stored as \"cat\" (not \"category\"). Homepage New Programs section uses cat=62.",
+      "learned_from": "BRIN-53",
+      "date": "2026-06-11T14:36:58.498Z"
+    },
+    {
+      "widget_type": "trx_sc_team",
+      "field_name": "count",
+      "note": "Same pattern as trx_sc_services — count field may not be in JSON if never changed from default.",
+      "learned_from": "BRIN-53",
+      "date": "2026-06-11T14:36:58.498Z"
+    }
+  ],
+  "taxonomy_learnings": [],
+  "task_outcomes": [
+    {
+      "issue": "BRIN-53",
+      "title": "Add fourth program card to homepage Programs section",
+      "type": "elementor",
+      "outcome": "success",
+      "page_id": 2360,
+      "widget_type": "trx_sc_services",
+      "note": "CPT post created in cat 62, count set explicitly",
+      "date": "2026-06-11T14:36:58.499Z"
+    }
+  ],
+  "site_quirks": [
+    {
+      "note": "WP Application Password auth fails silently on WP Engine — use X-Agent-Token header instead.",
+      "learned_from": "BRIN-53",
+      "date": "2026-06-11T14:36:58.498Z"
+    },
+    {
+      "note": "Railway blocks outbound port 22 — SSH impossible. All WP operations go through brinda-agent REST plugin over HTTPS.",
+      "learned_from": "BRIN-53",
+      "date": "2026-06-11T14:36:58.498Z"
+    },
+    {
+      "note": "ThemeREX CPT widgets (trx_sc_services etc) use taxonomy slug \"cpt_services_group\" NOT \"services_group\" for cpt_services posts.",
+      "learned_from": "BRIN-53",
+      "date": "2026-06-11T14:36:58.498Z"
+    },
+    {
+      "note": "trx_sc_price is a pricing widget, NOT a services card widget — do not treat as add-card target.",
+      "learned_from": "BRIN-54",
+      "date": "2026-06-11T14:36:58.498Z"
+    },
+    {
+      "note": "Elementor Page #XXXX titles are library templates, not real pages — skip in page matching.",
+      "learned_from": "BRIN-57",
+      "date": "2026-06-11T14:36:58.498Z"
+    }
+  ]
+}

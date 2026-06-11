@@ -8,6 +8,7 @@ const { createPost, updatePost, getPost, createPage, updatePage, getPage, search
 const { revertTask } = require('./revert');
 const { getPlugins, installPlugin, deactivatePlugin, updateYoastSeo, exportDb } = require('./wpCli');
 const { getKnowledge, getContextForTask, isStale, buildKnowledge } = require('./siteKnowledge');
+const { recallPage, rememberPage, rememberWidgetLearning, rememberQuirk, recordOutcome, getMemoryContext } = require('./agentMemory');
 
 // Initialize lazily so missing key doesn't crash the server at startup
 let openai;
@@ -62,7 +63,8 @@ async function runAgent(issueKey, feedbackContext = null, forcedTaskType = null)
       console.log(`📚 Knowledge base refreshed in background (${kb.pages?.length} pages)`);
     }).catch(e => console.warn(`⚠️ Background KB refresh failed: ${e.message}`));
   }
-  const kbContext = siteKb ? getContextForTask(taskType, siteKb) : '';
+  const kbContext     = siteKb ? getContextForTask(taskType, siteKb) : '';
+  const memoryContext = getMemoryContext();
 
   try {
     switch (taskType) {
@@ -985,6 +987,13 @@ add_action('rest_api_init', function() {
           // Try slug/title search using knowledge base first (avoids REST round-trips)
           const taskText = (title + ' ' + description).toLowerCase();
 
+          // ── Priority 0: agent memory — confirmed page from a past task ──────
+          const rememberedPage = recallPage(taskText);
+          if (rememberedPage) {
+            elemPage = await getPage(rememberedPage.id);
+            console.log(`🧠 Memory match: "${rememberedPage.title}" (ID: ${rememberedPage.id}) — confirmed by ${rememberedPage.confirmed_by}`);
+          }
+
           // ── Priority 1: explicit page ID in description e.g. "page ID: 193" ──
           const pageIdMatch = description.match(/page\s+id[:\s]+(\d+)/i);
           if (pageIdMatch) {
@@ -1174,7 +1183,7 @@ add_action('rest_api_init', function() {
         console.log(`🔬 Page map:\n${pageMapContext}`);
 
         // Combined context: site KB + live SSH page map (used in ALL Elementor GPT calls)
-        const fullContext = `${kbContext}\n\n${pageMapContext}`;
+        const fullContext = `${kbContext}\n\n${pageMapContext}\n\n${memoryContext}`;
 
         // 4. Read current Elementor data via REST (for widget indexing + revert backup)
         let elementorData = null;
@@ -1719,8 +1728,12 @@ Return JSON: { "clone_from_widget_index": <index from the list below>, "new_head
               await addComment(issueKey,
                 `🤔 I found ${editableWidgets.length} text sections on this page. Which one should I update?\n\n` +
                 `${options}\n\n` +
-                `Reply with: \`section: <number>\` — e.g. \`section: ${editableWidgets[0]?.index}\``
+                `Reply with: \`section: <number>\` — e.g. \`section: ${editableWidgets[0]?.index}\`\n\n` +
+                `💡 *Tip:* Attach a screenshot of the section and I'll identify it automatically next time.`
               );
+              recordOutcome(issueKey, title, 'elementor', 'clarification_needed', {
+                pageId: elemPage.id, note: `Section ambiguous — ${editableWidgets.length} candidates`
+              });
               await transitionIssue(issueKey, 'In Review');
               break;
             }
@@ -1791,6 +1804,14 @@ Write replacement text for the specified widget. Return JSON: { "new_text": "...
             `*Widget:* [${elemResult.widget_index}] ${tw.widgetType}.${tw.field}\n` +
             `*Old:* ${String(oldValue).replace(/<[^>]+>/g,'').substring(0, 80)}\n` +
             `*New:* ${String(elemResult.new_text).substring(0, 80)}`;
+
+          // 🧠 Record learnings from this edit
+          rememberPage(title, elemPage.id, elemPage.title?.rendered, elemPage.slug, issueKey);
+          recordOutcome(issueKey, title, 'elementor', 'success', {
+            pageId: elemPage.id, widgetType: tw.widgetType,
+            widgetIndex: elemResult.widget_index,
+            note: `Edited ${tw.widgetType}.${tw.field} on "${elemPage.title?.rendered}"`
+          });
 
         // ════════════════════════════════════════════════════════════════
         // PATH B — ADD CARD

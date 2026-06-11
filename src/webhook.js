@@ -5,6 +5,7 @@ const { revertTask } = require('./revert');
 const { getIssue, addComment, getRevertMeta, transitionIssue, appendToDescription } = require('./jira');
 const { updatePost, updatePage } = require('./wpRest');
 const { buildKnowledge, getKnowledge } = require('./siteKnowledge');
+const { loadMemory, getMemoryContext } = require('./agentMemory');
 
 const app = express();
 app.use(express.json());
@@ -256,6 +257,34 @@ app.post('/webhook/jira', async (req, res) => {
         } catch (kbErr) {
           await addComment(issueKey, `❌ Knowledge base rebuild failed: ${kbErr.message}`);
         }
+      }
+
+      // ── show memory — display what the agent has learned ────────────
+      if (commentText === 'show memory' || commentText === 'memory') {
+        const mem = loadMemory();
+        const pageCount    = Object.keys(mem.page_mappings).length;
+        const widgetCount  = mem.widget_learnings.length;
+        const quirkCount   = mem.site_quirks.length;
+        const outcomeCount = mem.task_outcomes.length;
+        const successCount = mem.task_outcomes.filter(t => t.outcome === 'success').length;
+
+        const pageMappings = Object.entries(mem.page_mappings)
+          .map(([k, v]) => `  • "${k}" → *${v.title}* (ID: ${v.id})`).join('\n');
+        const widgetLines = mem.widget_learnings
+          .map(w => `  • ${w.widget_type}.${w.field_name}: ${w.note.substring(0, 80)}`).join('\n');
+        const quirkLines = mem.site_quirks
+          .map(q => `  • ${q.note.substring(0, 100)}`).join('\n');
+        const recentOutcomes = mem.task_outcomes.slice(0, 8)
+          .map(t => `  • ${t.outcome === 'success' ? '✅' : t.outcome === 'clarification_needed' ? '🤔' : '❌'} ${t.issue}: ${t.title?.substring(0, 50)}`).join('\n');
+
+        await addComment(issueKey,
+          `🧠 *Agent Memory* (updated: ${mem.last_updated?.substring(0, 10)})\n\n` +
+          `*Stats:* ${pageCount} pages | ${widgetCount} widget learnings | ${quirkCount} quirks | ${successCount}/${outcomeCount} tasks successful\n\n` +
+          (pageMappings ? `*Confirmed Pages:*\n${pageMappings}\n\n` : '') +
+          (widgetLines  ? `*Widget Learnings:*\n${widgetLines}\n\n` : '') +
+          (quirkLines   ? `*Site Quirks:*\n${quirkLines}\n\n` : '') +
+          (recentOutcomes ? `*Recent Tasks:*\n${recentOutcomes}` : '')
+        );
       }
 
       // ── show knowledge — display current knowledge base summary ──
