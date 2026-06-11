@@ -2162,6 +2162,10 @@ async function redoTask(issueKey, feedback) {
   await transitionIssue(issueKey, 'In Progress');
 
   try {
+    // Load KB context for GPT (same as runAgent does)
+    const siteKb    = getKnowledge();
+    const kbContext = siteKb ? getContextForTask('content', siteKb) : '';
+
     // Get revert metadata to find the page/post that was previously edited
     const meta = await getRevertMeta(issueKey);
 
