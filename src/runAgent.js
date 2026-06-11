@@ -1010,11 +1010,25 @@ add_action('rest_api_init', function() {
         const agentPluginHdrs = { 'X-Agent-Token': process.env.AGENT_TOKEN || '' };
 
         if (pluginPlan.action === 'install') {
-          const instRes = await axios.post(
-            `${agentPluginBase}/install-plugin`,
-            { plugin_slug: pluginPlan.pluginSlug },
-            { headers: agentPluginHdrs, timeout: 120000 }
-          );
+          let instRes;
+          try {
+            instRes = await axios.post(
+              `${agentPluginBase}/install-plugin`,
+              { plugin_slug: pluginPlan.pluginSlug },
+              { headers: agentPluginHdrs, timeout: 120000 }
+            );
+          } catch (instErr) {
+            const errBody = instErr.response?.data;
+            const errMsg  = errBody?.message || errBody?.data?.message || instErr.message;
+            console.error(`❌ /install-plugin failed:`, JSON.stringify(errBody));
+            await addComment(issueKey,
+              `❌ Plugin install failed: ${errMsg}\n\n` +
+              (pluginBackupId ? `Backup checkpoint \`${pluginBackupId}\` is intact — no changes were made.\n\n` : '') +
+              `You can install manually: [WP Admin → Plugins → Add New|${process.env.WP_STAGING_URL}/wp-admin/plugin-install.php]`
+            );
+            await transitionIssue(issueKey, 'In Review');
+            break;
+          }
           const instData = instRes.data;
 
           if (!pluginBackupId) {

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Brinda Agent API
  * Description: REST API endpoints for the WordPress AI Agent (Railway → WP Engine over HTTPS)
- * Version: 2.3
+ * Version: 2.4
  * Author: Brinda AI Agent
  */
 
@@ -723,8 +723,11 @@ function brinda_update_plugin(WP_REST_Request $request) {
   require_once ABSPATH . 'wp-admin/includes/class-automatic-upgrader-skin.php';
   require_once ABSPATH . 'wp-admin/includes/plugin.php';
   require_once ABSPATH . 'wp-admin/includes/update.php';
+  require_once ABSPATH . 'wp-admin/includes/file.php';
 
   if (!function_exists('get_plugins')) require_once ABSPATH . 'wp-admin/includes/plugin.php';
+  if (!function_exists('WP_Filesystem')) require_once ABSPATH . 'wp-admin/includes/file.php';
+  WP_Filesystem(); // required on WP Engine managed hosting
 
   wp_update_plugins(); // refresh available updates
   $updates = get_plugin_updates();
@@ -821,6 +824,13 @@ function brinda_install_plugin(WP_REST_Request $request) {
   require_once ABSPATH . 'wp-admin/includes/class-automatic-upgrader-skin.php';
   require_once ABSPATH . 'wp-admin/includes/plugin.php';
   require_once ABSPATH . 'wp-admin/includes/plugin-install.php';
+  require_once ABSPATH . 'wp-admin/includes/file.php';
+
+  // Initialize WP_Filesystem (required on WP Engine and managed hosts)
+  if (!function_exists('WP_Filesystem')) {
+    require_once ABSPATH . 'wp-admin/includes/file.php';
+  }
+  WP_Filesystem();
 
   // Check if already installed
   $all_plugins = get_plugins();
