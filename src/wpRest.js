@@ -77,8 +77,26 @@ async function updatePage(id, fields) {
     );
     return res.data;
   } catch (err) {
+    const status = err.response?.status;
     const detail = err.response?.data?.message || err.response?.data?.code || err.message;
-    throw new Error(`WP updatePage failed (${err.response?.status}): ${detail}`);
+    // Log full response for debugging 403/401 issues
+    if (status === 403 || status === 401) {
+      console.error(`🔐 Auth error ${status} on page ${id}:`, JSON.stringify(err.response?.data || {}));
+      console.error(`   WP_USERNAME="${process.env.WP_USERNAME}" | WP_APP_PASSWORD set=${!!process.env.WP_APP_PASSWORD}`);
+      // Fallback: try via brinda-agent plugin (update-content endpoint)
+      try {
+        const agentRes = await axios.post(
+          `${BASE_URL}/wp-json/brinda-agent/v1/update-content`,
+          { post_id: id, fields },
+          { headers: { 'X-Agent-Token': process.env.AGENT_TOKEN || '' } }
+        );
+        console.log(`✅ updatePage fallback via brinda-agent succeeded for page ${id}`);
+        return agentRes.data;
+      } catch (fallbackErr) {
+        console.error(`   Fallback also failed: ${fallbackErr.response?.status} — ${fallbackErr.response?.data?.message || fallbackErr.message}`);
+      }
+    }
+    throw new Error(`WP updatePage failed (${status}): ${detail}`);
   }
 }
 
