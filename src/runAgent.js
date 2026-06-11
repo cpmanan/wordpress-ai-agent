@@ -1221,27 +1221,44 @@ Return JSON: {
           // Find the matching trx_sc_* widget node in the parsed JSON and bump count by 1
           let updatedCountJson = null;
           let countBumped = false;
-          function bumpCount(elements) {
+          const targetWidgetType = targetWidget.widgetType;
+
+          const bumpCount = (elements) => {
             for (const el of (elements || [])) {
-              if (el.elType === 'widget' && el.widgetType === targetWidget.widgetType) {
+              if (el.elType === 'widget' && el.widgetType === targetWidgetType) {
                 const s = el.settings || {};
-                // count may be stored as number OR string; treat missing/0 as unlimited (don't bump)
-                const raw = s.count;
-                const currentCount = parseInt(raw);
-                if (!isNaN(currentCount) && currentCount > 0) {
-                  const newCount = currentCount + 1;
-                  s.count = typeof raw === 'number' ? newCount : String(newCount);
-                  countBumped = true;
-                  console.log(`📈 Bumped ${el.widgetType} count: ${currentCount} → ${newCount} (type: ${typeof raw})`);
-                } else {
-                  console.log(`ℹ️  ${el.widgetType} count is "${raw}" — skipping bump (unlimited or zero)`);
+                // Dump ALL numeric/string settings so we can see what field holds the count
+                const settingsSnapshot = Object.entries(s)
+                  .filter(([,v]) => typeof v === 'string' || typeof v === 'number')
+                  .filter(([,v]) => !isNaN(parseInt(v)) || String(v).length < 30)
+                  .slice(0, 20)
+                  .map(([k,v]) => `${k}="${v}"`)
+                  .join(', ');
+                console.log(`🔍 ${el.widgetType} settings: ${settingsSnapshot}`);
+
+                // Try all possible count field names ThemeREX uses
+                const countFields = ['count', 'posts_count', 'number', 'posts_per_page', 'num'];
+                for (const field of countFields) {
+                  const raw = s[field];
+                  if (raw === undefined || raw === null || raw === '') continue;
+                  const currentCount = parseInt(raw);
+                  if (!isNaN(currentCount) && currentCount > 0) {
+                    const newCount = currentCount + 1;
+                    s[field] = typeof raw === 'number' ? newCount : String(newCount);
+                    countBumped = true;
+                    console.log(`📈 Bumped ${el.widgetType}.${field}: ${currentCount} → ${newCount}`);
+                    break; // only bump the first matching field
+                  }
+                }
+                if (!countBumped) {
+                  console.log(`⚠️  No count field found/bumped in ${el.widgetType}. All settings: ${JSON.stringify(s).substring(0, 300)}`);
                 }
               }
               bumpCount(el.elements);
             }
-          }
+          };
           bumpCount(parsed);
-          console.log(`📊 Count bump result: ${countBumped ? 'updated' : 'no change needed'}`);
+          console.log(`📊 Count bump result: ${countBumped ? 'updated ✅' : 'no count field found ❌'}`);
           updatedCountJson = JSON.stringify(parsed);
 
           // Write updated Elementor JSON (count change) back to the page
