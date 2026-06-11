@@ -60,15 +60,23 @@ async function buildKnowledge() {
     blog_page_id:      null,
   };
 
-  // ── 1. Site options (parallel) ─────────────────────────────────────────
-  const [blogname, siteurl, frontPageId, blogPageId, template, stylesheet] = await Promise.all([
-    cliVal(runWpCli, 'option get blogname'),
-    cliVal(runWpCli, 'option get siteurl'),
-    cliVal(runWpCli, 'option get page_on_front'),
-    cliVal(runWpCli, 'option get page_for_posts'),
-    cliVal(runWpCli, 'option get template'),
-    cliVal(runWpCli, 'option get stylesheet'),
-  ]);
+  // ── 1. Site options — single WP CLI call to avoid parallel connection races ──
+  // wp eval echoes all options as JSON in one SSH round-trip
+  let blogname = '', siteurl = '', frontPageId = '', blogPageId = '', template = '', stylesheet = '';
+  try {
+    const optJson = await runWpCli(
+      `eval 'echo json_encode(["blogname"=>get_option("blogname"),"siteurl"=>get_option("siteurl"),"page_on_front"=>get_option("page_on_front"),"page_for_posts"=>get_option("page_for_posts"),"template"=>get_option("template"),"stylesheet"=>get_option("stylesheet")]);'`
+    );
+    const opts = JSON.parse(optJson || '{}');
+    blogname   = opts.blogname      || '';
+    siteurl    = opts.siteurl       || '';
+    frontPageId = String(opts.page_on_front  || '');
+    blogPageId  = String(opts.page_for_posts || '');
+    template   = opts.template      || '';
+    stylesheet = opts.stylesheet    || '';
+  } catch (e) {
+    console.warn(`  ⚠️  Could not fetch site options: ${e.message.split('\n')[0]}`);
+  }
 
   kb.site          = { blogname, siteurl };
   kb.front_page_id = parseInt(frontPageId) || null;

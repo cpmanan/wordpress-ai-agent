@@ -4,55 +4,77 @@ const os = require('os');
 const path = require('path');
 
 let ssh = null;
+let connectingPromise = null; // mutex — prevents parallel connect races
 
 // Setup SSH key file from env var
 function setupSshKey() {
   const keyPath = path.join(os.tmpdir(), 'wpengine_cli_key');
   const rawKey = process.env.SSH_PRIVATE_KEY || '';
-  // Handle escaped newlines from Railway env vars
+  // Handle escaped \n literals stored in Railway env vars
   const key = rawKey.includes('\\n') ? rawKey.replace(/\\n/g, '\n') : rawKey;
   fs.writeFileSync(keyPath, key + '\n', { mode: 0o600 });
   return keyPath;
 }
 
-// Connect to WP Engine SSH
-async function connect() {
-  if (ssh && ssh.isConnected()) return ssh;
-  ssh = new NodeSSH();
-  const keyPath = setupSshKey();
-
-  console.log(`🔌 Connecting SSH to ${process.env.WPENGINE_SSH_HOST} as ${process.env.WPENGINE_SSH_USER}`);
-
+// Check if the current ssh instance is alive
+function isAlive() {
+  if (!ssh) return false;
   try {
-    await ssh.connect({
-      host: process.env.WPENGINE_SSH_HOST,
-      username: process.env.WPENGINE_SSH_USER,
-      privateKeyPath: keyPath,
-      port: 22,
-      readyTimeout: 20000,
-      algorithms: { serverHostKey: ['ssh-ed25519', 'ecdsa-sha2-nistp256', 'ssh-rsa'] }
-    });
-  } catch (err) {
-    ssh = null;
-    if (err.message.includes('handshake') || err.message.includes('Timed out')) {
-      throw new Error(
-        `SSH connection to WP Engine failed. Please ensure:\n` +
-        `1. SSH public key is added to WP Engine → SSH Keys (account level, not install level)\n` +
-        `2. URL: https://my.wpengine.com/ssh_keys\n` +
-        `SSH Host: ${process.env.WPENGINE_SSH_HOST}\n` +
-        `Original error: ${err.message}`
-      );
-    }
-    throw err;
+    // node-ssh exposes the underlying ssh2 Connection as ssh.connection
+    return ssh.connection && !ssh.connection._sock?.destroyed;
+  } catch {
+    return false;
   }
+}
 
-  console.log(`✅ SSH connected to ${process.env.WPENGINE_SSH_HOST}`);
-  return ssh;
+// Connect to WP Engine SSH — serialised via connectingPromise mutex
+async function connect() {
+  if (isAlive()) return ssh;
+
+  // If a connect is already in-flight, wait for it rather than racing
+  if (connectingPromise) return connectingPromise;
+
+  connectingPromise = (async () => {
+    ssh = new NodeSSH();
+    const keyPath = setupSshKey();
+
+    console.log(`🔌 Connecting SSH to ${process.env.WPENGINE_SSH_HOST} as ${process.env.WPENGINE_SSH_USER}`);
+
+    try {
+      await ssh.connect({
+        host:       process.env.WPENGINE_SSH_HOST,
+        username:   process.env.WPENGINE_SSH_USER,
+        privateKeyPath: keyPath,
+        port:       22,
+        readyTimeout: 20000,
+        algorithms: { serverHostKey: ['ssh-ed25519', 'ecdsa-sha2-nistp256', 'ssh-rsa'] }
+      });
+      console.log(`✅ SSH connected to ${process.env.WPENGINE_SSH_HOST}`);
+    } catch (err) {
+      ssh = null;
+      const hint = err.message.includes('handshake') || err.message.includes('Timed out') || err.message.includes('All configured');
+      if (hint) {
+        throw new Error(
+          `SSH connection to WP Engine failed.\n` +
+          `Host: ${process.env.WPENGINE_SSH_HOST}\n` +
+          `Check: https://my.wpengine.com/ssh_keys (account-level, not install-level)\n` +
+          `Original: ${err.message}`
+        );
+      }
+      throw err;
+    } finally {
+      connectingPromise = null; // release mutex regardless of outcome
+    }
+    return ssh;
+  })();
+
+  return connectingPromise;
 }
 
 // Disconnect SSH
 function disconnect() {
-  if (ssh) { ssh.dispose(); ssh = null; }
+  if (ssh) { try { ssh.dispose(); } catch {} ssh = null; }
+  connectingPromise = null;
 }
 
 // Run a WP CLI command via SSH
