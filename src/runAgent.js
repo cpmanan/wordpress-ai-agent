@@ -1479,6 +1479,15 @@ Return JSON: {
 
         // ── Helper: search Pexels for an image (uses PEXELS_API_KEY env var) ──
         async function searchImage(query) {
+          const unsplashKey = process.env.UNSPLASH_ACCESS_KEY;
+          if (unsplashKey) {
+            const r = await axios.get('https://api.unsplash.com/search/photos', {
+              headers: { Authorization: `Client-ID ${unsplashKey}` },
+              params: { query, per_page: 3, orientation: 'landscape' }
+            });
+            const photo = r.data?.results?.[0];
+            if (photo) return { url: photo.urls.regular, credit: `Photo by ${photo.user.name} on Unsplash` };
+          }
           const pexelsKey = process.env.PEXELS_API_KEY;
           if (pexelsKey) {
             const r = await axios.get('https://api.pexels.com/v1/search', {
@@ -1488,9 +1497,8 @@ Return JSON: {
             const photo = r.data?.photos?.[0];
             if (photo) return { url: photo.src.large, credit: `Photo by ${photo.photographer} on Pexels` };
           }
-          // Fallback: Unsplash direct (no API key needed for single image)
-          const unsplashSlug = query.replace(/\s+/g, ',');
-          return { url: `https://images.unsplash.com/photo-1544367567-0f2fcb009e0b?w=800&q=80`, credit: 'Photo via Unsplash' };
+          // Fallback: Unsplash random (no API key needed)
+          return { url: `https://source.unsplash.com/800x600/?${encodeURIComponent(query)}`, credit: 'Photo via Unsplash' };
         }
 
         // ── Build indexed widget list (with elId for tree traversal) ─────────
@@ -1963,45 +1971,72 @@ Keep count between 1 and 5.` },
           const addCount    = Math.min(Math.max(1, plan.count || 3), 5);
           console.log(`🔍 Searching Pexels for "${searchQuery}" — adding ${addCount} images`);
 
-          // Search Pexels and upload images
+          // Search for images using Unsplash (primary) → Pexels (fallback)
+          // Unsplash: free API key from unsplash.com/developers
+          // Pexels:   free API key from pexels.com/api
           const newGalleryEntries = [];
-          const pexelsKey = process.env.PEXELS_API_KEY;
-          if (!pexelsKey) {
+          const unsplashKey = process.env.UNSPLASH_ACCESS_KEY;
+          const pexelsKey   = process.env.PEXELS_API_KEY;
+
+          if (!unsplashKey && !pexelsKey) {
             await addComment(issueKey,
-              `⚠️ PEXELS_API_KEY is not set — cannot search for images automatically.\n\n` +
-              `Please add photos manually in Elementor:\n` +
-              `[Edit in Elementor|${WP_BASE}/wp-admin/post.php?post=${elemPage.id}&action=elementor]\n\n` +
-              `Or set PEXELS_API_KEY and comment \`run\` to retry.`
+              `⚠️ No image search API key is configured.\n\n` +
+              `To enable automatic image search, set one of:\n` +
+              `• *UNSPLASH_ACCESS_KEY* — free at [unsplash.com/developers|https://unsplash.com/developers] (recommended)\n` +
+              `• *PEXELS_API_KEY* — free at [pexels.com/api|https://www.pexels.com/api/]\n\n` +
+              `Add to Railway environment variables, then comment \`run\` to retry.\n\n` +
+              `Or add photos manually:\n[Edit in Elementor|${WP_BASE}/wp-admin/post.php?post=${elemPage.id}&action=elementor]`
             );
             await transitionIssue(issueKey, 'In Review');
             break;
           }
 
           try {
-            const pexelsRes = await axios.get('https://api.pexels.com/v1/search', {
-              headers: { Authorization: pexelsKey },
-              params: { query: searchQuery, per_page: addCount + 2, orientation: 'landscape' }
-            });
-            const photos = pexelsRes.data.photos || [];
-            console.log(`📷 Pexels returned ${photos.length} photos for "${searchQuery}"`);
-
-            // Filter out any already in gallery
             const existingUrls = new Set(existingGallery.map(g => g.url));
-            const freshPhotos  = photos.filter(p => !existingUrls.has(p.src.large)).slice(0, addCount);
+            let photos = [];
+
+            if (unsplashKey) {
+              // ── Unsplash API ──────────────────────────────────────────────
+              console.log(`📷 Searching Unsplash for "${searchQuery}"`);
+              const unsplashRes = await axios.get('https://api.unsplash.com/search/photos', {
+                headers: { Authorization: `Client-ID ${unsplashKey}` },
+                params: { query: searchQuery, per_page: addCount + 3, orientation: 'landscape' }
+              });
+              photos = (unsplashRes.data.results || []).map(p => ({
+                imgUrl:  p.urls.regular,
+                id:      p.id,
+                credit:  `Photo by ${p.user.name} on Unsplash`
+              }));
+              console.log(`📷 Unsplash returned ${photos.length} photos`);
+            } else {
+              // ── Pexels API fallback ────────────────────────────────────────
+              console.log(`📷 Searching Pexels for "${searchQuery}"`);
+              const pexelsRes = await axios.get('https://api.pexels.com/v1/search', {
+                headers: { Authorization: pexelsKey },
+                params: { query: searchQuery, per_page: addCount + 3, orientation: 'landscape' }
+              });
+              photos = (pexelsRes.data.photos || []).map(p => ({
+                imgUrl:  p.src.large,
+                id:      p.id,
+                credit:  `Photo by ${p.photographer} on Pexels`
+              }));
+              console.log(`📷 Pexels returned ${photos.length} photos`);
+            }
+
+            const freshPhotos = photos.filter(p => !existingUrls.has(p.imgUrl)).slice(0, addCount);
 
             for (const photo of freshPhotos) {
-              const imgUrl      = photo.src.large || photo.src.medium;
               const safeFilename = searchQuery.replace(/[^a-z0-9]/gi, '-').toLowerCase() + `-${photo.id}.jpg`;
               try {
-                const uploaded = await uploadImageToWP(imgUrl, safeFilename);
+                const uploaded = await uploadImageToWP(photo.imgUrl, safeFilename);
                 newGalleryEntries.push({ id: uploaded.id, url: uploaded.url });
-                console.log(`✅ Uploaded gallery image: ID ${uploaded.id}`);
+                console.log(`✅ Uploaded gallery image: ID ${uploaded.id} — ${photo.credit}`);
               } catch (uploadErr) {
                 console.warn(`⚠️ Failed to upload photo ${photo.id}: ${uploadErr.message}`);
               }
             }
-          } catch (pexelsErr) {
-            console.warn(`⚠️ Pexels search failed: ${pexelsErr.message}`);
+          } catch (searchErr) {
+            console.warn(`⚠️ Image search failed: ${searchErr.message}`);
           }
 
           if (newGalleryEntries.length === 0) {
