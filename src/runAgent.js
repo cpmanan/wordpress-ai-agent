@@ -2454,7 +2454,7 @@ Return JSON: {
   },
   "image_search_query": "search query for product image (omit if no image change needed)",
   "what_changed": "brief description"
-}`, fullContext) },
+}`, kbContext) },
             { role: 'user', content: `Task: ${title}\n\nDetails: ${description}` }
           ],
           response_format: { type: 'json_object' }
