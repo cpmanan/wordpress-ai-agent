@@ -1217,20 +1217,49 @@ Return JSON: {
 
           console.log(`✅ New ${cptType} post created: ID ${newPost?.id} "${cardContent.title}"`);
 
-          // Save revert meta (delete post to undo)
+          // ── Increment the widget's `count` in Elementor JSON so the new card shows ──
+          // Find the matching trx_sc_* widget node in the parsed JSON and bump count by 1
+          let updatedCountJson = null;
+          function bumpCount(elements) {
+            for (const el of (elements || [])) {
+              if (el.elType === 'widget' && el.widgetType === targetWidget.widgetType) {
+                const s = el.settings || {};
+                const currentCount = parseInt(s.count) || 0;
+                if (currentCount > 0) {
+                  s.count = String(currentCount + 1);
+                  console.log(`📈 Bumped ${el.widgetType} count: ${currentCount} → ${s.count}`);
+                }
+              }
+              bumpCount(el.elements);
+            }
+          }
+          bumpCount(parsed);
+          updatedCountJson = JSON.stringify(parsed);
+
+          // Write updated Elementor JSON (count change) back to the page
+          try {
+            await axios.post(`${WP_BASE}/wp-json/brinda-agent/v1/elementor-data`, {
+              post_id:        elemPage.id,
+              elementor_data: updatedCountJson,
+            }, { headers: agentHdrs });
+            console.log(`✅ Elementor count updated on page ${elemPage.id}`);
+          } catch (writeErr) {
+            console.warn(`⚠️ Could not update count in Elementor JSON: ${writeErr.message}`);
+          }
+
+          // Save revert meta — stores BOTH the new post ID AND original Elementor JSON
+          // Revert will: delete the CPT post AND restore the original count in JSON
           await setRevertMeta(issueKey, {
-            type:       'elementor',
-            pageId:     elemPage.id,
-            savedElementorData: elementorData, // page itself unchanged
-            cptPostId:  newPost?.id,           // new post to delete on revert
-            timestamp:  new Date().toISOString(),
+            type:               'elementor',
+            pageId:             elemPage.id,
+            savedElementorData: elementorData, // original JSON (restores count on revert)
+            cptPostId:          newPost?.id,   // new post to delete on revert
+            timestamp:          new Date().toISOString(),
           });
 
           // Flush caches
-          try {
-            const { runWpCli } = require('./wpCli');
-            await runWpCli('cache flush');
-          } catch {}
+          await axios.post(`${WP_BASE}/wp-json/brinda-agent/v1/flush-cache`,
+            { post_id: elemPage.id }, { headers: agentHdrs }).catch(() => {});
           await transitionIssue(issueKey, 'In Review');
           await purgeCache();
           await new Promise(r => setTimeout(r, 4000));

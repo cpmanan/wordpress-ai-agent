@@ -63,21 +63,45 @@ async function revertTask(issueKey, commentOnKey) {
         const agentHdrs = { 'X-Agent-Token': process.env.AGENT_TOKEN || '' };
 
         if (cptPostId) {
-          // CPT-backed add_card revert: delete the newly created post
+          // CPT-backed add_card revert:
+          // 1. Delete the newly created CPT post
+          // 2. Restore original Elementor JSON (resets the count back)
+          let postDeleted = false;
           try {
             await axiosLib.delete(`${WP_BASE}/wp-json/wp/v2/posts/${cptPostId}`, {
               auth: wpAuth, params: { force: true }
             });
+            postDeleted = true;
+            console.log(`✅ Deleted CPT post ${cptPostId}`);
           } catch {
-            // Try as 'pages' endpoint, or use WP CLI
             try {
               const { runWpCli } = require('./wpCli');
               await runWpCli(`post delete ${cptPostId} --force`);
+              postDeleted = true;
             } catch (e2) {
               console.warn(`Could not delete CPT post ${cptPostId}: ${e2.message}`);
             }
           }
-          await addComment(postTo, `✅ Reverted *${issueKey}* — new program card (ID: ${cptPostId}) deleted`);
+
+          // Restore original Elementor JSON (this resets the count display)
+          if (savedElementorData) {
+            try {
+              await axiosLib.post(
+                `${WP_BASE}/wp-json/brinda-agent/v1/elementor-data`,
+                { post_id: pageId, elementor_data: savedElementorData },
+                { headers: agentHdrs }
+              );
+              console.log(`✅ Restored original Elementor JSON for page ${pageId}`);
+            } catch (e3) {
+              console.warn(`Could not restore Elementor JSON: ${e3.message}`);
+            }
+          }
+
+          await addComment(postTo,
+            `✅ Reverted *${issueKey}*\n\n` +
+            `• New card (post ID: ${cptPostId}) ${postDeleted ? 'deleted ✅' : 'could not be deleted ⚠️'}\n` +
+            `• Elementor page count restored to original ✅`
+          );
         } else {
           // Standard Elementor JSON revert
           await axiosLib.post(
