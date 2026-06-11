@@ -1,12 +1,15 @@
 const TASK_TYPES = {
-  FILE:      'file',       // CSS, PHP, theme file edits
-  CONTENT:   'content',    // Create/update posts or pages
-  NAV:       'nav',        // Navigation menu changes
-  SEO:       'seo',        // Yoast SEO meta updates
-  PLUGIN:    'plugin',     // Plugin install/activate/deactivate
-  BACKUP:    'backup',     // Plugin/core updates with backup
-  ELEMENTOR: 'elementor',  // Elementor page builder edits
-  REVERT:    'revert'      // Revert a previous change
+  FILE:        'file',        // CSS, PHP, theme file edits
+  CONTENT:     'content',     // Create/update posts or pages
+  NAV:         'nav',         // Navigation menu changes
+  SEO:         'seo',         // Yoast SEO meta updates
+  PLUGIN:      'plugin',      // Plugin install/activate/deactivate
+  BACKUP:      'backup',      // Plugin/core updates with backup
+  ELEMENTOR:   'elementor',   // Elementor page builder edits
+  WOOCOMMERCE: 'woocommerce', // WooCommerce product edits
+  EVENTS:      'events',      // Tribe Events / mp-event CPT
+  DONATION:    'donation',    // Give donation forms
+  REVERT:      'revert'       // Revert a previous change
 };
 
 const FILE_KEYWORDS = [
@@ -78,30 +81,56 @@ const ELEMENTOR_KEYWORDS = [
   'banner text', 'intro text', 'body text'
 ];
 
+const WOOCOMMERCE_KEYWORDS = [
+  'product', 'woocommerce', 'shop', 'store', 'price', 'pricing',
+  'product description', 'product image', 'product title', 'product name',
+  'add product', 'edit product', 'update product', 'product category',
+  'sale price', 'regular price', 'stock', 'inventory', 'sku',
+  'product page', 'shop page', 'cart', 'checkout',
+];
+
+const EVENTS_KEYWORDS = [
+  'event', 'events', 'class schedule', 'schedule', 'workshop',
+  'add event', 'new event', 'create event', 'update event', 'edit event',
+  'tribe event', 'event date', 'event time', 'event location', 'event venue',
+  'upcoming event', 'yoga event', 'retreat', 'class event',
+];
+
+const DONATION_KEYWORDS = [
+  'donation', 'donate', 'give', 'giving', 'fundrais',
+  'donation form', 'donation goal', 'donation amount', 'campaign',
+  'charity', 'nonprofit', 'fund',
+];
+
 function detectTaskType(title, description = '') {
   const text = `${title} ${description}`.toLowerCase();
 
   if (text.includes('revert')) return TASK_TYPES.REVERT;
 
   // Check most specific first
-  if (BACKUP_KEYWORDS.some(k => text.includes(k)))    return TASK_TYPES.BACKUP;
-  if (PLUGIN_KEYWORDS.some(k => text.includes(k)))    return TASK_TYPES.PLUGIN;
+  if (BACKUP_KEYWORDS.some(k => text.includes(k)))       return TASK_TYPES.BACKUP;
+  if (PLUGIN_KEYWORDS.some(k => text.includes(k)))       return TASK_TYPES.PLUGIN;
+
+  // Domain-specific CPT types before generic content
+  if (WOOCOMMERCE_KEYWORDS.some(k => text.includes(k)))  return TASK_TYPES.WOOCOMMERCE;
+  if (EVENTS_KEYWORDS.some(k => text.includes(k)))       return TASK_TYPES.EVENTS;
+  if (DONATION_KEYWORDS.some(k => text.includes(k)))     return TASK_TYPES.DONATION;
 
   // Nav before content — "create page and add to nav" should be NAV
-  if (NAV_KEYWORDS.some(k => text.includes(k)))       return TASK_TYPES.NAV;
+  if (NAV_KEYWORDS.some(k => text.includes(k)))          return TASK_TYPES.NAV;
 
-  if (SEO_KEYWORDS.some(k => text.includes(k)))       return TASK_TYPES.SEO;
+  if (SEO_KEYWORDS.some(k => text.includes(k)))          return TASK_TYPES.SEO;
 
   // ELEMENTOR before CONTENT — "update heading via elementor" is Elementor, not content
-  if (ELEMENTOR_KEYWORDS.some(k => text.includes(k))) return TASK_TYPES.ELEMENTOR;
+  if (ELEMENTOR_KEYWORDS.some(k => text.includes(k)))    return TASK_TYPES.ELEMENTOR;
 
   // CONTENT before FILE — "update heading / change text on page" is content, not CSS
-  if (CONTENT_KEYWORDS.some(k => text.includes(k)))   return TASK_TYPES.CONTENT;
+  if (CONTENT_KEYWORDS.some(k => text.includes(k)))      return TASK_TYPES.CONTENT;
 
   // FILE last among content-related types
-  if (FILE_KEYWORDS.some(k => text.includes(k)))      return TASK_TYPES.FILE;
+  if (FILE_KEYWORDS.some(k => text.includes(k)))         return TASK_TYPES.FILE;
 
   return TASK_TYPES.CONTENT; // default
 }
 
-module.exports = { detectTaskType, TASK_TYPES };
+module.exports = { detectTaskType, TASK_TYPES, WOOCOMMERCE_KEYWORDS, EVENTS_KEYWORDS, DONATION_KEYWORDS };

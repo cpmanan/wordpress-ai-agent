@@ -9,7 +9,7 @@ const { createPost, updatePost, getPost, createPage, updatePage, getPage, search
 const { revertTask } = require('./revert');
 const { getPlugins, installPlugin, deactivatePlugin, updateYoastSeo, exportDb } = require('./wpCli');
 const { getKnowledge, getContextForTask, isStale, buildKnowledge } = require('./siteKnowledge');
-const { recallPage, rememberPage, rememberWidgetLearning, rememberQuirk, recordOutcome, getMemoryContext } = require('./agentMemory');
+const { recallPage, rememberPage, rememberWidgetLearning, rememberQuirk, recordOutcome, rememberErrorPattern, recordCorrection, getMemoryContext } = require('./agentMemory');
 
 // Initialize lazily so missing key doesn't crash the server at startup
 let openai;
@@ -1294,6 +1294,9 @@ add_action('rest_api_init', function() {
           trx_sc_courses:   'cpt_courses',
           trx_sc_team:      'cpt_team',
           trx_sc_portfolio: 'cpt_portfolio',
+          // Events & tribe support
+          trx_sc_events:    'tribe_events',
+          trx_sc_list:      'mp-event',
         };
         const isAddCardTask = /\b(add|new card|fourth|insert|create another|duplicate)\b/i.test(title + ' ' + description);
         // Only enter PATH C if: task says add-card AND the CPT widget is in CPT_MAP AND has a category
@@ -2134,6 +2137,239 @@ Keep count between 1 and 5.` },
         break;
       }
 
+      // ── WOOCOMMERCE: Edit product price, description, image, title ───────
+      case TASK_TYPES.WOOCOMMERCE: {
+        console.log(`🛒 WooCommerce task detected`);
+
+        // Ask GPT what product to find and what to change
+        const wcPlan = await getOpenAI().chat.completions.create({
+          model: 'gpt-4o',
+          messages: [
+            { role: 'system', content: withKb(`You are a WooCommerce product editor.
+Determine what needs to change on which product.
+Return JSON: {
+  "product_slug": "slug or name of the product",
+  "product_id": null,
+  "changes": {
+    "name":              "new title (omit if unchanged)",
+    "description":       "new description HTML (omit if unchanged)",
+    "short_description": "new short description (omit if unchanged)",
+    "regular_price":     "e.g. 29.99 (omit if unchanged)",
+    "sale_price":        "e.g. 19.99 (omit if unchanged)",
+    "status":            "publish|draft (omit if unchanged)"
+  },
+  "image_search_query": "search query for product image (omit if no image change needed)",
+  "what_changed": "brief description"
+}`, fullContext) },
+            { role: 'user', content: `Task: ${title}\n\nDetails: ${description}` }
+          ],
+          response_format: { type: 'json_object' }
+        });
+        const wcData = JSON.parse(wcPlan.choices[0].message.content);
+        console.log(`🛒 WooCommerce plan:`, JSON.stringify(wcData));
+
+        // Find the product via WP REST
+        let productId = wcData.product_id;
+        if (!productId && wcData.product_slug) {
+          const searchRes = await axios.get(`${WP_BASE}/wp-json/wp/v2/product`, {
+            auth: wpAuth,
+            params: { search: wcData.product_slug, per_page: 5 }
+          }).catch(() => null);
+          const products = searchRes?.data || [];
+          if (products.length) {
+            productId = products[0].id;
+            console.log(`✅ Found product: "${products[0].title?.rendered}" (ID: ${productId})`);
+          }
+        }
+
+        if (!productId) {
+          await addComment(issueKey,
+            `⚠️ Could not find product "${wcData.product_slug}" in WooCommerce.\n\n` +
+            `Please check the product name or provide the product ID in the description.\n` +
+            `[WooCommerce Products|${WP_BASE}/wp-admin/edit.php?post_type=product]`
+          );
+          await transitionIssue(issueKey, 'In Review');
+          break;
+        }
+
+        // Upload image if needed
+        let imageAttachment = null;
+        if (wcData.image_search_query) {
+          try {
+            const imgResult   = await searchImage(wcData.image_search_query);
+            const safeFilename = wcData.image_search_query.replace(/[^a-z0-9]/gi,'-').toLowerCase() + '.jpg';
+            imageAttachment   = await uploadImageToWP(imgResult.url, safeFilename);
+            console.log(`✅ Product image uploaded: ID ${imageAttachment.id}`);
+          } catch (imgErr) {
+            console.warn(`⚠️ Product image upload failed: ${imgErr.message}`);
+          }
+        }
+
+        // Build update payload
+        const wcUpdate = { ...wcData.changes };
+        if (imageAttachment) {
+          wcUpdate.featured_media = imageAttachment.id;
+        }
+
+        // Update via WP REST (WooCommerce uses wp/v2/product)
+        await axios.post(`${WP_BASE}/wp-json/wp/v2/product/${productId}`, wcUpdate, { auth: wpAuth });
+
+        await setRevertMeta(issueKey, { type: 'woocommerce', postId: productId, postType: 'product' });
+        await transitionIssue(issueKey, 'In Review');
+
+        const productUrl = `${WP_BASE}/?post_type=product&p=${productId}`;
+        await addComment(issueKey,
+          `✅ WooCommerce product updated!\n\n` +
+          `*Changed:* ${wcData.what_changed}\n` +
+          `*Product ID:* ${productId}\n\n` +
+          `[View Product|${productUrl}] | [Edit in WP Admin|${WP_BASE}/wp-admin/post.php?post=${productId}&action=edit]\n\n` +
+          `──────────────────────\n` +
+          `💬 Commands:\n` +
+          `• \`redo: <feedback>\` — adjust\n` +
+          `• \`revert\` — undo`
+        );
+        rememberPage(title, productId, wcData.product_slug, wcData.product_slug, issueKey);
+        recordOutcome(issueKey, title, 'woocommerce', 'success', { pageId: productId, note: wcData.what_changed });
+        break;
+      }
+
+      // ── EVENTS: Add/edit Tribe Events or mp-event CPT ────────────────────
+      case TASK_TYPES.EVENTS: {
+        console.log(`📅 Events task detected`);
+
+        const eventPlan = await getOpenAI().chat.completions.create({
+          model: 'gpt-4o',
+          messages: [
+            { role: 'system', content: withKb(`You are a WordPress events manager for a yoga studio.
+Determine what event to create or update.
+Return JSON: {
+  "action": "create" | "update",
+  "event_title":   "title of the event",
+  "event_date":    "YYYY-MM-DD",
+  "event_time":    "HH:MM (24h)",
+  "event_end_date":"YYYY-MM-DD",
+  "event_end_time":"HH:MM (24h)",
+  "event_location":"venue/location name",
+  "description":   "event description HTML",
+  "category":      "yoga category name if applicable",
+  "what_changed":  "brief description"
+}`, fullContext) },
+            { role: 'user', content: `Task: ${title}\n\nDetails: ${description}` }
+          ],
+          response_format: { type: 'json_object' }
+        });
+        const eventData = JSON.parse(eventPlan.choices[0].message.content);
+        console.log(`📅 Event plan: ${eventData.action} — "${eventData.event_title}"`);
+
+        // Create or update via WP REST (tribe_events CPT)
+        const eventPostType = 'tribe_events';
+        const eventPayload  = {
+          title:   eventData.event_title,
+          content: eventData.description || '',
+          status:  'publish',
+          meta: {
+            _EventStartDate:    `${eventData.event_date} ${eventData.event_time || '09:00'}`,
+            _EventEndDate:      `${eventData.event_end_date || eventData.event_date} ${eventData.event_end_time || '10:00'}`,
+            _EventVenue:        eventData.event_location || '',
+          }
+        };
+
+        let eventId;
+        if (eventData.action === 'create') {
+          const res = await axios.post(`${WP_BASE}/wp-json/wp/v2/${eventPostType}`, eventPayload, { auth: wpAuth });
+          eventId = res.data.id;
+        } else {
+          // Search for existing event
+          const searchRes = await axios.get(`${WP_BASE}/wp-json/wp/v2/${eventPostType}`, {
+            auth: wpAuth, params: { search: eventData.event_title, per_page: 3 }
+          }).catch(() => null);
+          const found = searchRes?.data?.[0];
+          if (found) {
+            eventId = found.id;
+            await axios.post(`${WP_BASE}/wp-json/wp/v2/${eventPostType}/${eventId}`, eventPayload, { auth: wpAuth });
+          } else {
+            // Create if not found
+            const res = await axios.post(`${WP_BASE}/wp-json/wp/v2/${eventPostType}`, eventPayload, { auth: wpAuth });
+            eventId = res.data.id;
+          }
+        }
+
+        await setRevertMeta(issueKey, { type: 'events', postId: eventId, postType: eventPostType });
+        await transitionIssue(issueKey, 'In Review');
+        await addComment(issueKey,
+          `✅ Event ${eventData.action === 'create' ? 'created' : 'updated'}!\n\n` +
+          `*Event:* ${eventData.event_title}\n` +
+          `*Date:* ${eventData.event_date} at ${eventData.event_time || 'TBD'}\n` +
+          `*Location:* ${eventData.event_location || 'Not specified'}\n` +
+          `*Changed:* ${eventData.what_changed}\n\n` +
+          `[Edit Event|${WP_BASE}/wp-admin/post.php?post=${eventId}&action=edit]\n\n` +
+          `• \`redo: <feedback>\` — adjust | \`revert\` — undo`
+        );
+        recordOutcome(issueKey, title, 'events', 'success', { pageId: eventId, note: eventData.what_changed });
+        break;
+      }
+
+      // ── DONATION: Edit Give donation forms ────────────────────────────────
+      case TASK_TYPES.DONATION: {
+        console.log(`💝 Donation task detected`);
+
+        const donationPlan = await getOpenAI().chat.completions.create({
+          model: 'gpt-4o',
+          messages: [
+            { role: 'system', content: withKb(`You are editing a Give donation form for a yoga studio.
+Return JSON: {
+  "form_name":     "name/title of the donation form",
+  "changes": {
+    "goal":         "fundraising goal amount as number (omit if unchanged)",
+    "minimum":      "minimum donation amount (omit if unchanged)",
+    "description":  "form description HTML (omit if unchanged)",
+    "title":        "new form title (omit if unchanged)"
+  },
+  "what_changed": "brief description"
+}`, fullContext) },
+            { role: 'user', content: `Task: ${title}\n\nDetails: ${description}` }
+          ],
+          response_format: { type: 'json_object' }
+        });
+        const donData = JSON.parse(donationPlan.choices[0].message.content);
+        console.log(`💝 Donation plan:`, JSON.stringify(donData));
+
+        // Search for the form via give_forms CPT
+        const formSearch = await axios.get(`${WP_BASE}/wp-json/wp/v2/give_forms`, {
+          auth: wpAuth, params: { search: donData.form_name || '', per_page: 5 }
+        }).catch(() => null);
+        const forms  = formSearch?.data || [];
+        const form   = forms[0];
+
+        if (!form) {
+          await addComment(issueKey,
+            `⚠️ Could not find donation form "${donData.form_name}".\n\n` +
+            `[Give Forms|${WP_BASE}/wp-admin/edit.php?post_type=give_forms]`
+          );
+          await transitionIssue(issueKey, 'In Review');
+          break;
+        }
+
+        const donUpdate = {};
+        if (donData.changes.title)       donUpdate.title   = donData.changes.title;
+        if (donData.changes.description) donUpdate.content = donData.changes.description;
+        if (donData.changes.goal)        donUpdate.meta    = { _give_set_goal: donData.changes.goal };
+
+        await axios.post(`${WP_BASE}/wp-json/wp/v2/give_forms/${form.id}`, donUpdate, { auth: wpAuth });
+
+        await setRevertMeta(issueKey, { type: 'donation', postId: form.id, postType: 'give_forms' });
+        await transitionIssue(issueKey, 'In Review');
+        await addComment(issueKey,
+          `✅ Donation form updated!\n\n` +
+          `*Form:* ${form.title?.rendered}\n` +
+          `*Changed:* ${donData.what_changed}\n\n` +
+          `[Edit Form|${WP_BASE}/wp-admin/post.php?post=${form.id}&action=edit]\n\n` +
+          `• \`redo: <feedback>\` — adjust | \`revert\` — undo`
+        );
+        recordOutcome(issueKey, title, 'donation', 'success', { pageId: form.id, note: donData.what_changed });
+        break;
+      }
+
       default: {
         await addComment(issueKey,
           `⚠️ Could not determine task type for: "${title}"\n\n` +
@@ -2142,13 +2378,19 @@ Keep count between 1 and 5.` },
           `• "Create a new Services page and add to navigation" (nav)\n` +
           `• "Install WooCommerce plugin" (plugin)\n` +
           `• "Update SEO meta for the About page" (SEO)\n` +
-          `• "Add phone number to contact page" (content)`
+          `• "Add phone number to contact page" (content)\n` +
+          `• "Update product price for Beginner Yoga class" (woocommerce)\n` +
+          `• "Add new yoga workshop event on June 20" (events)\n` +
+          `• "Update donation goal to $5000" (donation)`
         );
         await transitionIssue(issueKey, 'In Review');
       }
     }
   } catch (err) {
     console.error(`❌ Error processing ${issueKey}:`, err.message);
+    // Record error pattern in memory so agent learns from it
+    const errorSig = err.message.replace(/\d+/g, 'N').substring(0, 80);
+    rememberErrorPattern(errorSig, `task: ${title} | type: ${taskType}`, 'see error log', issueKey);
     // Move to In Review (not To Do) so it's visible and doesn't auto-retrigger
     await addComment(issueKey,
       `❌ Agent encountered an error:\n\n${err.message}\n\n` +

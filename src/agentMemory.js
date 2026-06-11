@@ -38,6 +38,14 @@ function emptyMemory() {
     // Free-form site quirks discovered by the agent
     site_quirks: [],
     // e.g. { note, learned_from, date }
+
+    // Error patterns — what went wrong and how it was fixed
+    error_patterns: [],
+    // e.g. { error_signature, context, fix, learned_from, date }
+
+    // Correction log — when user corrected agent's choice via section:/page:
+    corrections: [],
+    // e.g. { issue, task_text, wrong_choice, correct_choice, type: 'page'|'section', date }
   };
 }
 
@@ -122,6 +130,68 @@ function recordOutcome(issueKey, title, taskType, outcome, details = {}) {
   saveMemory(mem);
 }
 
+// ── Record error pattern and fix ─────────────────────────────────────────────
+// Call when agent fails — records what went wrong so future tasks can avoid it
+function rememberErrorPattern(errorSignature, context, fix, issueKey) {
+  const mem = loadMemory();
+  if (!mem.error_patterns) mem.error_patterns = [];
+  const existing = mem.error_patterns.find(e => e.error_signature === errorSignature);
+  if (existing) {
+    existing.fix          = fix;
+    existing.context      = context;
+    existing.confirmed_by = issueKey;
+    existing.date         = new Date().toISOString();
+    existing.count        = (existing.count || 1) + 1;
+  } else {
+    mem.error_patterns.push({
+      error_signature: errorSignature,
+      context,
+      fix,
+      learned_from: issueKey,
+      count: 1,
+      date: new Date().toISOString(),
+    });
+  }
+  // Keep last 30 error patterns
+  mem.error_patterns = mem.error_patterns.slice(0, 30);
+  saveMemory(mem);
+  console.log(`🧠 Remembered error pattern: "${errorSignature}" → fix: ${fix}`);
+}
+
+// ── Record user correction (section: N or page: N reply) ─────────────────────
+// When user corrects agent's guess, store so agent avoids same mistake
+function recordCorrection(issueKey, taskText, wrongChoice, correctChoice, type) {
+  const mem = loadMemory();
+  if (!mem.corrections) mem.corrections = [];
+  mem.corrections.unshift({
+    issue:         issueKey,
+    task_text:     taskText.toLowerCase().substring(0, 100),
+    wrong_choice:  wrongChoice,
+    correct_choice: correctChoice,
+    type,          // 'page' | 'section'
+    date:          new Date().toISOString(),
+  });
+  mem.corrections = mem.corrections.slice(0, 50);
+  saveMemory(mem);
+  console.log(`🧠 Recorded correction: ${type} — wrong: ${wrongChoice} → correct: ${correctChoice} (${issueKey})`);
+
+  // If it's a page correction — also update page_mappings
+  if (type === 'page' && correctChoice?.id) {
+    rememberPage(taskText, correctChoice.id, correctChoice.title, correctChoice.slug, issueKey);
+  }
+}
+
+// ── Get error patterns context for GPT ───────────────────────────────────────
+function getErrorContext() {
+  const mem = loadMemory();
+  if (!mem.error_patterns?.length) return '';
+  const lines = ['\n### Known Error Patterns (avoid these)'];
+  mem.error_patterns.slice(0, 10).forEach(e => {
+    lines.push(`  • [${e.count}x] ${e.error_signature}: ${e.fix}`);
+  });
+  return lines.join('\n');
+}
+
 // ── Look up a remembered page for a task ─────────────────────────────────────
 function recallPage(taskText) {
   const mem = loadMemory();
@@ -167,6 +237,16 @@ function getMemoryContext() {
     });
   }
 
+  // Include error patterns so GPT knows what to avoid
+  lines.push(getErrorContext());
+
+  if (mem.corrections?.length) {
+    lines.push('\n### Past Corrections (agent was wrong, user fixed)');
+    mem.corrections.slice(0, 5).forEach(c => {
+      lines.push(`  • ${c.type} correction on "${c.task_text}": wrong=${JSON.stringify(c.wrong_choice)} → correct=${JSON.stringify(c.correct_choice)}`);
+    });
+  }
+
   return lines.join('\n');
 }
 
@@ -176,6 +256,9 @@ module.exports = {
   rememberWidgetLearning,
   rememberQuirk,
   recordOutcome,
+  rememberErrorPattern,
+  recordCorrection,
   recallPage,
   getMemoryContext,
+  getErrorContext,
 };

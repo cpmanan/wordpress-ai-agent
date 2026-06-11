@@ -5,7 +5,7 @@ const { revertTask } = require('./revert');
 const { getIssue, addComment, getRevertMeta, transitionIssue, appendToDescription } = require('./jira');
 const { updatePost, updatePage } = require('./wpRest');
 const { buildKnowledge, getKnowledge } = require('./siteKnowledge');
-const { loadMemory, getMemoryContext } = require('./agentMemory');
+const { loadMemory, getMemoryContext, recordCorrection } = require("./agentMemory");
 
 const app = express();
 app.use(express.json());
@@ -189,6 +189,11 @@ app.post('/webhook/jira', async (req, res) => {
       if (sectionReply) {
         const sectionIndex = sectionReply[1];
         console.log(`📌 Section clarification received for ${issueKey}: widget index ${sectionIndex}`);
+        // Record correction so agent learns for future similar tasks
+        const issueForSection = await getIssue(issueKey).catch(() => null);
+        if (issueForSection) {
+          recordCorrection(issueKey, issueForSection.fields?.summary || '', 'unknown', sectionIndex, 'section');
+        }
         await runAgent(issueKey, `section:${sectionIndex}`);
       }
 
@@ -198,6 +203,11 @@ app.post('/webhook/jira', async (req, res) => {
       if (pageReply) {
         const pageId = pageReply[1];
         console.log(`📄 Page clarification received for ${issueKey}: page ID ${pageId}`);
+        // Record correction so agent learns which page to use for this kind of task
+        const issueForPage = await getIssue(issueKey).catch(() => null);
+        if (issueForPage) {
+          recordCorrection(issueKey, issueForPage.fields?.summary || '', 'unknown', { id: parseInt(pageId) }, 'page');
+        }
         // Append page ID to description so runAgent picks it up via regex
         await appendToDescription(issueKey, `page ID: ${pageId}`).catch(() => {});
         await runAgent(issueKey);
