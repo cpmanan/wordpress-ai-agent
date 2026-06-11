@@ -2218,14 +2218,20 @@ async function redoTask(issueKey, feedback) {
       console.log(`📷 Found ${imgTagMatches.length} img tags in content`);
 
       if (imgTagMatches.length > 0) {
+        // Fetch issue context early so it's available for image search queries
+        const redoIssueEarly    = await getIssue(issueKey).catch(() => null);
+        const originalTitleEarly = redoIssueEarly?.fields?.summary || currentTitle;
+        const originalDescEarly  = redoIssueEarly?.fields?.description?.content
+          ?.map(b => b.content?.map(c => c.text).join('')).join('\n') || '';
+
         // Ask GPT what search queries to use for each image based on surrounding context
         const imgPlan = await getOpenAI().chat.completions.create({
           model: 'gpt-4o',
           messages: [
             { role: 'system', content: `You are planning image replacements for a yoga studio website.
-For each image, suggest an Unsplash/Pexels search query based on the surrounding context.
+For each image, suggest an Unsplash/Pexels search query that matches the card/section theme.
 Return JSON: { "images": [ { "old_src": "...", "search_query": "yoga ..." }, ... ] }` },
-            { role: 'user', content: `Page title: ${currentTitle}\nFeedback: ${feedback}\n\nHTML with images:\n${currentContent.substring(0, 4000)}` }
+            { role: 'user', content: `Original task: "${originalTitleEarly}"\nTask description: ${originalDescEarly || 'N/A'}\nPage title: ${currentTitle}\nFeedback: ${feedback}\n\nHTML with images:\n${currentContent.substring(0, 4000)}` }
           ],
           response_format: { type: 'json_object' }
         });
@@ -2276,6 +2282,13 @@ Return JSON: { "images": [ { "old_src": "...", "search_query": "yoga ..." }, ...
       console.log(`⚠️ No images replaced — falling through to normal redo`);
     }
 
+    // Fetch full Jira ticket context so GPT understands the original task
+    const redoIssue       = await getIssue(issueKey);
+    const originalTitle   = redoIssue.fields?.summary || '';
+    const originalDesc    = redoIssue.fields?.description?.content
+      ?.map(b => b.content?.map(c => c.text).join('')).join('\n') || '';
+    const previousFeedback = meta.lastFeedback ? `Previous feedback: "${meta.lastFeedback}"` : '';
+
     // Ask OpenAI to apply the feedback correction
     const aiResponse = await getOpenAI().chat.completions.create({
       model: 'gpt-4o',
@@ -2284,13 +2297,14 @@ Return JSON: { "images": [ { "old_src": "...", "search_query": "yoga ..." }, ...
           role: 'system',
           content: withKb(`You are a WordPress page editor fixing content based on client feedback.
 You will be given:
-1. The current page HTML (what the agent last produced)
-2. The original page HTML (before any agent changes)
-3. The client's feedback on what needs to be fixed
+1. The original Jira task (what was asked to be done)
+2. The current page HTML (what the agent last produced)
+3. The original page HTML (before any agent changes)
+4. The client's feedback on what needs to be fixed
 
 STRICT RULES:
 1. Apply ONLY the correction described in the feedback
-2. Do NOT change anything else
+2. Refer back to the original task to ensure the intent is still fulfilled
 3. Keep all HTML structure, CSS classes, and attributes intact
 4. Return the complete corrected HTML
 
@@ -2302,7 +2316,7 @@ Return JSON: {
         },
         {
           role: 'user',
-          content: `Client feedback: ${feedback}\n\nCurrent page title: ${currentTitle}\n\nCurrent page HTML (needs fixing):\n${currentContent}\n\nOriginal page HTML (before agent changes):\n${savedContent?.content || 'Not available'}`
+          content: `Original task: "${originalTitle}"\nTask description: ${originalDesc || 'N/A'}\n\n${previousFeedback}\nNew feedback: ${feedback}\n\nCurrent page title: ${currentTitle}\n\nCurrent page HTML (needs fixing):\n${currentContent}\n\nOriginal page HTML (before agent changes):\n${savedContent?.content || 'Not available'}`
         }
       ],
       response_format: { type: 'json_object' }
