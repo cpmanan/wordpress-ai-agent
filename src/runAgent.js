@@ -1010,6 +1010,31 @@ add_action('rest_api_init', function() {
         const agentPluginHdrs = { 'X-Agent-Token': process.env.AGENT_TOKEN || '' };
 
         if (pluginPlan.action === 'install') {
+          // WP Engine blocks programmatic plugin installs (new dir creation) in web context.
+          // Best path: backup is done, now guide user to install via WP Admin with direct link.
+          const wpOrgUrl   = `https://wordpress.org/plugins/${pluginPlan.pluginSlug}/`;
+          const wpAdminUrl = `${process.env.WP_STAGING_URL}/wp-admin/plugin-install.php?s=${encodeURIComponent(pluginPlan.pluginName)}&tab=search&type=term`;
+          await transitionIssue(issueKey, 'In Review');
+          await addComment(issueKey,
+            `🔒 *Backup checkpoint created:* \`${pluginBackupId || 'N/A'}\`\n\n` +
+            `ℹ️ *Plugin install requires WP Admin* (WP Engine restricts filesystem writes via REST API)\n\n` +
+            `*To install ${pluginPlan.pluginName}:*\n` +
+            `1. Go to [WP Admin → Plugins → Add New|${wpAdminUrl}]\n` +
+            `2. Search for *"${pluginPlan.pluginName}"*\n` +
+            `3. Click *Install Now* → *Activate*\n\n` +
+            `• [View on WordPress.org|${wpOrgUrl}]\n` +
+            `• Backup checkpoint is intact if anything goes wrong`
+          );
+          await setRevertMeta(issueKey, {
+            type: 'plugin',
+            action: 'install_manual',
+            pluginSlug: pluginPlan.pluginSlug,
+            backupCheckpointId: pluginBackupId,
+            timestamp: new Date().toISOString()
+          });
+          break;
+
+          // ── Dead code below preserved in case WP Engine ever allows this ──
           let instRes;
           try {
             instRes = await axios.post(
@@ -1019,14 +1044,7 @@ add_action('rest_api_init', function() {
             );
           } catch (instErr) {
             const errBody = instErr.response?.data;
-            const errMsg  = errBody?.message || errBody?.data?.message || instErr.message;
             console.error(`❌ /install-plugin failed:`, JSON.stringify(errBody));
-            await addComment(issueKey,
-              `❌ Plugin install failed: ${errMsg}\n\n` +
-              (pluginBackupId ? `Backup checkpoint \`${pluginBackupId}\` is intact — no changes were made.\n\n` : '') +
-              `You can install manually: [WP Admin → Plugins → Add New|${process.env.WP_STAGING_URL}/wp-admin/plugin-install.php]`
-            );
-            await transitionIssue(issueKey, 'In Review');
             break;
           }
           const instData = instRes.data;
