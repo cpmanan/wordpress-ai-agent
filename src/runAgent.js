@@ -1163,48 +1163,26 @@ Return JSON: {
             }
           }
 
-          // Create the CPT post via REST API
-          const newPostBody = {
-            title:   cardContent.title,
-            content: cardContent.content || '',
-            excerpt: cardContent.excerpt || '',
-            status:  'publish',
-            ...(catId ? { [`${cptType.replace('cpt_','')}_group`]: [parseInt(catId)] } : {}),
-            ...(featuredImageId ? { featured_media: featuredImageId } : {}),
-          };
-
-          // Try REST endpoint for CPT (WordPress auto-registers /wp/v2/<post_type>)
-          const cptSlug = cptType.replace('cpt_', '');
+          // Create the CPT post via brinda-agent plugin endpoint
+          // This handles wp_insert_post + taxonomy assignment + featured image server-side
           let newPost = null;
           try {
             const postRes = await axios.post(
-              `${WP_BASE}/wp-json/wp/v2/${cptSlug}s`, // e.g. /wp/v2/servicess — try plural
-              { ...newPostBody, [`${cptSlug}_group`]: catId ? [parseInt(catId)] : [] },
-              { auth: wpAuth }
+              `${WP_BASE}/wp-json/brinda-agent/v1/create-cpt-post`,
+              {
+                post_type:         cptType,
+                title:             cardContent.title,
+                excerpt:           cardContent.excerpt || '',
+                content:           cardContent.content || '',
+                cat_id:            catId ? parseInt(catId) : 0,
+                featured_media_id: featuredImageId || 0,
+              },
+              { headers: agentHdrs }
             );
             newPost = postRes.data;
-          } catch {
-            try {
-              const postRes = await axios.post(
-                `${WP_BASE}/wp-json/wp/v2/${cptSlug}`, // try singular
-                newPostBody,
-                { auth: wpAuth }
-              );
-              newPost = postRes.data;
-            } catch (postErr) {
-              // Fall back to WP CLI
-              console.warn(`REST CPT post failed, trying WP CLI: ${postErr.message}`);
-              const { runWpCli } = require('./wpCli');
-              const titleEsc = cardContent.title.replace(/"/g, '\\"');
-              const excerptEsc = (cardContent.excerpt || '').replace(/"/g, '\\"');
-              const newId = await runWpCli(
-                `post create --post_type=${cptType} --post_status=publish --post_title="${titleEsc}" --post_excerpt="${excerptEsc}"${catId ? ` --post_category=${catId}` : ''} --porcelain`
-              );
-              if (featuredImageId) await runWpCli(`post meta update ${newId.trim()} _thumbnail_id ${featuredImageId}`);
-              // Assign to the correct taxonomy
-              if (catId) await runWpCli(`post term set ${newId.trim()} ${cptType}_group ${catId}`).catch(()=>{});
-              newPost = { id: parseInt(newId.trim()), link: `${WP_BASE}/?p=${newId.trim()}` };
-            }
+            console.log(`✅ CPT post created via plugin: ID ${newPost.id} "${newPost.title}"`);
+          } catch (postErr) {
+            throw new Error(`Failed to create ${cptType} post: ${postErr.response?.data?.message || postErr.message}`);
           }
 
           console.log(`✅ New ${cptType} post created: ID ${newPost?.id} "${cardContent.title}"`);

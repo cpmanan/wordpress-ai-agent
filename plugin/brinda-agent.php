@@ -94,6 +94,17 @@ add_action('rest_api_init', function () {
     'callback'            => 'brinda_get_cpt_posts',
     'permission_callback' => 'brinda_auth',
   ]);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // POST /wp-json/brinda-agent/v1/create-cpt-post
+  // Body: { post_type, title, excerpt, content, cat_id, featured_media_id }
+  // Creates a CPT post and assigns it to the correct taxonomy term.
+  // ══════════════════════════════════════════════════════════════════════════
+  register_rest_route('brinda-agent/v1', '/create-cpt-post', [
+    'methods'             => 'POST',
+    'callback'            => 'brinda_create_cpt_post',
+    'permission_callback' => 'brinda_auth',
+  ]);
 });
 
 // ── /site-info ─────────────────────────────────────────────────────────────
@@ -222,6 +233,52 @@ function brinda_flush_cache(WP_REST_Request $request) {
   wp_cache_flush();
   if (function_exists('wpecommon_purge_varnish_cache_all')) wpecommon_purge_varnish_cache_all();
   return rest_ensure_response(['success' => true]);
+}
+
+// ── /create-cpt-post POST ─────────────────────────────────────────────────
+function brinda_create_cpt_post(WP_REST_Request $request) {
+  $post_type         = sanitize_key($request->get_param('post_type') ?: 'cpt_services');
+  $title             = sanitize_text_field($request->get_param('title') ?: '');
+  $excerpt           = sanitize_textarea_field($request->get_param('excerpt') ?: '');
+  $content           = wp_kses_post($request->get_param('content') ?: '');
+  $cat_id            = (int) $request->get_param('cat_id');
+  $featured_media_id = (int) $request->get_param('featured_media_id');
+
+  if (!$title) return new WP_Error('missing_param', 'title required', ['status' => 400]);
+
+  // Insert the post
+  $post_id = wp_insert_post([
+    'post_type'    => $post_type,
+    'post_status'  => 'publish',
+    'post_title'   => $title,
+    'post_excerpt' => $excerpt,
+    'post_content' => $content,
+  ], true);
+
+  if (is_wp_error($post_id)) {
+    return new WP_Error('insert_failed', $post_id->get_error_message(), ['status' => 500]);
+  }
+
+  // Assign taxonomy term (convention: post_type + '_group', e.g. cpt_services_group)
+  if ($cat_id) {
+    $taxonomy = $post_type . '_group';
+    if (taxonomy_exists($taxonomy)) {
+      wp_set_object_terms($post_id, $cat_id, $taxonomy);
+    }
+  }
+
+  // Set featured image
+  if ($featured_media_id) {
+    set_post_thumbnail($post_id, $featured_media_id);
+  }
+
+  $post = get_post($post_id);
+  return rest_ensure_response([
+    'id'     => $post_id,
+    'title'  => $post->post_title,
+    'status' => $post->post_status,
+    'link'   => get_permalink($post_id),
+  ]);
 }
 
 // ── /cpt-posts GET ─────────────────────────────────────────────────────────
