@@ -2462,17 +2462,32 @@ Return JSON: {
         const wcData = JSON.parse(wcPlan.choices[0].message.content);
         console.log(`🛒 WooCommerce plan:`, JSON.stringify(wcData));
 
-        // Find the product via WP REST
-        let productId = wcData.product_id;
+        // Find the product via WooCommerce REST API (wc/v3/products supports App Password auth)
+        let productId   = wcData.product_id;
+        let savedProduct = null;
         if (!productId && wcData.product_slug) {
-          const searchRes = await axios.get(`${WP_BASE}/wp-json/wp/v2/product`, {
+          const searchRes = await axios.get(`${WP_BASE}/wp-json/wc/v3/products`, {
             auth: wpAuth,
             params: { search: wcData.product_slug, per_page: 5 }
           }).catch(() => null);
           const products = searchRes?.data || [];
           if (products.length) {
-            productId = products[0].id;
-            console.log(`✅ Found product: "${products[0].title?.rendered}" (ID: ${productId})`);
+            productId    = products[0].id;
+            savedProduct = products[0]; // save for revert
+            console.log(`✅ Found product via wc/v3: "${products[0].name}" (ID: ${productId})`);
+          }
+        }
+
+        // If not found via wc/v3, fall back to wp/v2/product (search only)
+        if (!productId && wcData.product_slug) {
+          const searchRes2 = await axios.get(`${WP_BASE}/wp-json/wp/v2/product`, {
+            auth: wpAuth,
+            params: { search: wcData.product_slug, per_page: 5 }
+          }).catch(() => null);
+          const products2 = searchRes2?.data || [];
+          if (products2.length) {
+            productId = products2[0].id;
+            console.log(`✅ Found product via wp/v2: "${products2[0].title?.rendered}" (ID: ${productId})`);
           }
         }
 
@@ -2486,29 +2501,50 @@ Return JSON: {
           break;
         }
 
+        // Fetch current product state for revert if not already loaded
+        if (!savedProduct) {
+          savedProduct = await axios.get(`${WP_BASE}/wp-json/wc/v3/products/${productId}`, { auth: wpAuth })
+            .then(r => r.data).catch(() => null);
+        }
+
         // Upload image if needed
         let imageAttachment = null;
         if (wcData.image_search_query) {
           try {
-            const imgResult   = await searchImage(wcData.image_search_query);
+            const imgResult    = await searchImage(wcData.image_search_query);
             const safeFilename = wcData.image_search_query.replace(/[^a-z0-9]/gi,'-').toLowerCase() + '.jpg';
-            imageAttachment   = await uploadImageToWP(imgResult.url, safeFilename);
+            imageAttachment    = await uploadImageToWP(imgResult.url, safeFilename);
             console.log(`✅ Product image uploaded: ID ${imageAttachment.id}`);
           } catch (imgErr) {
             console.warn(`⚠️ Product image upload failed: ${imgErr.message}`);
           }
         }
 
-        // Build update payload
-        const wcUpdate = { ...wcData.changes };
-        if (imageAttachment) {
-          wcUpdate.featured_media = imageAttachment.id;
-        }
+        // Build WooCommerce REST update payload (wc/v3 field names)
+        const wcUpdate = {};
+        const ch = wcData.changes;
+        if (ch.name)              wcUpdate.name              = ch.name;
+        if (ch.description)       wcUpdate.description       = ch.description;
+        if (ch.short_description) wcUpdate.short_description = ch.short_description;
+        if (ch.regular_price)     wcUpdate.regular_price     = String(ch.regular_price);
+        if (ch.sale_price)        wcUpdate.sale_price        = String(ch.sale_price);
+        if (ch.status)            wcUpdate.status            = ch.status;
+        if (imageAttachment)      wcUpdate.images            = [{ id: imageAttachment.id }];
 
-        // Update via WP REST (WooCommerce uses wp/v2/product)
-        await axios.post(`${WP_BASE}/wp-json/wp/v2/product/${productId}`, wcUpdate, { auth: wpAuth });
+        // Update via WooCommerce REST API
+        await axios.put(`${WP_BASE}/wp-json/wc/v3/products/${productId}`, wcUpdate, { auth: wpAuth });
 
-        await setRevertMeta(issueKey, { type: 'woocommerce', postId: productId, postType: 'product' });
+        // Save previous state for revert
+        const savedWcState = savedProduct ? {
+          name:              savedProduct.name,
+          description:       savedProduct.description,
+          short_description: savedProduct.short_description,
+          regular_price:     savedProduct.regular_price,
+          sale_price:        savedProduct.sale_price,
+          images:            savedProduct.images,
+        } : null;
+
+        await setRevertMeta(issueKey, { type: 'woocommerce', postId: productId, savedState: savedWcState });
         await transitionIssue(issueKey, 'In Review');
 
         const productUrl = `${WP_BASE}/?post_type=product&p=${productId}`;
@@ -2555,43 +2591,77 @@ Return JSON: {
         const eventData = JSON.parse(eventPlan.choices[0].message.content);
         console.log(`📅 Event plan: ${eventData.action} — "${eventData.event_title}"`);
 
-        // Create or update via WP REST (tribe_events CPT)
-        const eventPostType = 'tribe_events';
-        const eventPayload  = {
+        // Try Tribe Events REST API first (registered by The Events Calendar plugin)
+        // Tribe registers: /wp-json/tribe/events/v1/events (preferred — handles meta natively)
+        // Fallback: wp/v2/tribe_events (standard WP REST, but meta may be read-only)
+        const tribeApiBase   = `${WP_BASE}/wp-json/tribe/events/v1/events`;
+        const tribePayload   = {
+          title:       eventData.event_title,
+          description: eventData.description || '',
+          start_date:  `${eventData.event_date} ${eventData.event_time || '09:00:00'}`,
+          end_date:    `${eventData.event_end_date || eventData.event_date} ${eventData.event_end_time || '10:00:00'}`,
+          venue:       eventData.event_location ? { venue: eventData.event_location } : undefined,
+          status:      'publish',
+        };
+
+        // WP fallback payload (if Tribe API not available)
+        const wpEventPayload = {
           title:   eventData.event_title,
           content: eventData.description || '',
           status:  'publish',
           meta: {
-            _EventStartDate:    `${eventData.event_date} ${eventData.event_time || '09:00'}`,
-            _EventEndDate:      `${eventData.event_end_date || eventData.event_date} ${eventData.event_end_time || '10:00'}`,
-            _EventVenue:        eventData.event_location || '',
-          }
+            _EventStartDate: `${eventData.event_date} ${eventData.event_time || '09:00'}`,
+            _EventEndDate:   `${eventData.event_end_date || eventData.event_date} ${eventData.event_end_time || '10:00'}`,
+          },
         };
 
         let eventId;
+        let usedTribeApi = false;
+
         if (eventData.action === 'create') {
-          const res = await axios.post(`${WP_BASE}/wp-json/wp/v2/${eventPostType}`, eventPayload, { auth: wpAuth });
-          eventId = res.data.id;
+          // Try Tribe API first
+          try {
+            const res = await axios.post(tribeApiBase, tribePayload, { auth: wpAuth });
+            eventId     = res.data.id;
+            usedTribeApi = true;
+            console.log(`✅ Event created via Tribe API: ID ${eventId}`);
+          } catch (tribeErr) {
+            console.warn(`⚠️ Tribe API failed (${tribeErr.response?.status}), falling back to wp/v2`);
+            const res = await axios.post(`${WP_BASE}/wp-json/wp/v2/tribe_events`, wpEventPayload, { auth: wpAuth });
+            eventId = res.data.id;
+          }
         } else {
           // Search for existing event
-          const searchRes = await axios.get(`${WP_BASE}/wp-json/wp/v2/${eventPostType}`, {
+          const searchRes = await axios.get(`${WP_BASE}/wp-json/wp/v2/tribe_events`, {
             auth: wpAuth, params: { search: eventData.event_title, per_page: 3 }
           }).catch(() => null);
           const found = searchRes?.data?.[0];
-          if (found) {
-            eventId = found.id;
-            await axios.post(`${WP_BASE}/wp-json/wp/v2/${eventPostType}/${eventId}`, eventPayload, { auth: wpAuth });
+          const targetId = found?.id;
+
+          if (targetId) {
+            eventId = targetId;
+            try {
+              await axios.post(`${tribeApiBase}/${targetId}`, tribePayload, { auth: wpAuth });
+              usedTribeApi = true;
+            } catch {
+              await axios.post(`${WP_BASE}/wp-json/wp/v2/tribe_events/${targetId}`, wpEventPayload, { auth: wpAuth });
+            }
           } else {
             // Create if not found
-            const res = await axios.post(`${WP_BASE}/wp-json/wp/v2/${eventPostType}`, eventPayload, { auth: wpAuth });
-            eventId = res.data.id;
+            try {
+              const res = await axios.post(tribeApiBase, tribePayload, { auth: wpAuth });
+              eventId = res.data.id; usedTribeApi = true;
+            } catch {
+              const res = await axios.post(`${WP_BASE}/wp-json/wp/v2/tribe_events`, wpEventPayload, { auth: wpAuth });
+              eventId = res.data.id;
+            }
           }
         }
 
-        await setRevertMeta(issueKey, { type: 'events', postId: eventId, postType: eventPostType });
+        await setRevertMeta(issueKey, { type: 'events', postId: eventId, postType: 'tribe_events', action: eventData.action });
         await transitionIssue(issueKey, 'In Review');
         await addComment(issueKey,
-          `✅ Event ${eventData.action === 'create' ? 'created' : 'updated'}!\n\n` +
+          `✅ Event ${eventData.action === 'create' ? 'created' : 'updated'}! ${usedTribeApi ? '(via Tribe API)' : '(via WP REST)'}\n\n` +
           `*Event:* ${eventData.event_title}\n` +
           `*Date:* ${eventData.event_date} at ${eventData.event_time || 'TBD'}\n` +
           `*Location:* ${eventData.event_location || 'Not specified'}\n` +
@@ -2644,6 +2714,13 @@ Return JSON: {
           break;
         }
 
+        // Save current state for revert
+        const savedDonState = {
+          title:   form.title?.rendered,
+          content: form.content?.rendered,
+          goal:    form.meta?._give_set_goal,
+        };
+
         const donUpdate = {};
         if (donData.changes.title)       donUpdate.title   = donData.changes.title;
         if (donData.changes.description) donUpdate.content = donData.changes.description;
@@ -2651,7 +2728,7 @@ Return JSON: {
 
         await axios.post(`${WP_BASE}/wp-json/wp/v2/give_forms/${form.id}`, donUpdate, { auth: wpAuth });
 
-        await setRevertMeta(issueKey, { type: 'donation', postId: form.id, postType: 'give_forms' });
+        await setRevertMeta(issueKey, { type: 'donation', postId: form.id, savedState: savedDonState });
         await transitionIssue(issueKey, 'In Review');
         await addComment(issueKey,
           `✅ Donation form updated!\n\n` +
