@@ -96,6 +96,16 @@ add_action('rest_api_init', function () {
   ]);
 
   // ══════════════════════════════════════════════════════════════════════════
+  // GET /wp-json/brinda-agent/v1/extended-info
+  // Returns: DB schema (custom tables), plugin configs, custom code snippets
+  // ══════════════════════════════════════════════════════════════════════════
+  register_rest_route('brinda-agent/v1', '/extended-info', [
+    'methods'             => 'GET',
+    'callback'            => 'brinda_extended_info',
+    'permission_callback' => 'brinda_auth',
+  ]);
+
+  // ══════════════════════════════════════════════════════════════════════════
   // DELETE /wp-json/brinda-agent/v1/delete-post?post_id=123
   // Works for any post type (CPT, post, page). Uses wp_delete_post() directly.
   // ══════════════════════════════════════════════════════════════════════════
@@ -260,6 +270,181 @@ function brinda_flush_cache(WP_REST_Request $request) {
   wp_cache_flush();
   if (function_exists('wpecommon_purge_varnish_cache_all')) wpecommon_purge_varnish_cache_all();
   return rest_ensure_response(['success' => true]);
+}
+
+// ── /extended-info GET ────────────────────────────────────────────────────
+function brinda_extended_info() {
+  global $wpdb;
+
+  // ── 1. DATABASE SCHEMA ────────────────────────────────────────────────────
+  // All tables in the DB, flagged as core WP, plugin-added, or custom
+  $core_tables = [
+    'commentmeta','comments','links','options','postmeta','posts',
+    'term_relationships','term_taxonomy','termmeta','terms','usermeta','users',
+  ];
+  $all_tables = $wpdb->get_col('SHOW TABLES');
+  $db_schema = [];
+  foreach ($all_tables as $table) {
+    $bare = str_replace($wpdb->prefix, '', $table);
+    $is_core = in_array($bare, $core_tables);
+
+    // Get column info for every table (skip large core tables to keep response lean)
+    $columns = [];
+    if (!$is_core || in_array($bare, ['options', 'postmeta', 'usermeta'])) {
+      $cols = $wpdb->get_results("DESCRIBE `{$table}`");
+      foreach ($cols as $col) {
+        $columns[] = [
+          'name' => $col->Field,
+          'type' => $col->Type,
+          'null' => $col->Null,
+          'key'  => $col->Key,
+        ];
+      }
+    }
+
+    $db_schema[] = [
+      'table'    => $table,
+      'bare'     => $bare,
+      'is_core'  => $is_core,
+      'columns'  => $columns,
+    ];
+  }
+
+  // ── 2. PLUGIN CONFIGURATIONS ──────────────────────────────────────────────
+  // Known option keys per plugin — expand this list as needed
+  $plugin_option_map = [
+    'elementor'              => ['elementor_experiment-container','elementor_css_print_method','elementor_global_images_lightbox','elementor_default_generic_fonts','elementor_active_kit','elementor_version'],
+    'woocommerce'            => ['woocommerce_store_address','woocommerce_currency','woocommerce_currency_pos','woocommerce_price_decimal_sep','woocommerce_checkout_page_id','woocommerce_cart_page_id','woocommerce_shop_page_id','woocommerce_enable_guest_checkout','woocommerce_enable_signup_and_login_from_checkout','woocommerce_registration_generate_password'],
+    'yoast-seo'              => ['wpseo','wpseo_titles','wpseo_social'],
+    'contact-form-7'         => ['wpcf7'],
+    'the-events-calendar'    => ['tribe_events_calendar_options'],
+    'give'                   => ['give_settings'],
+    'smash-balloon-instagram'=> ['sb_instagram_settings'],
+    'wp-engine'              => ['wpe_custom_login_url','wpe_default_cdn'],
+    'timetable'              => ['timetable_settings','timetable_options'],
+    'slider-revolution'      => [],  // no single options key
+  ];
+
+  $plugin_configs = [];
+  $active_plugins = get_option('active_plugins', []);
+  foreach ($active_plugins as $plugin_file) {
+    $slug = explode('/', $plugin_file)[0];
+    $options_to_read = $plugin_option_map[$slug] ?? [];
+
+    // Auto-detect option keys containing the plugin slug if not in map
+    if (empty($options_to_read)) {
+      $slug_clean = str_replace(['-','_'], '%', $slug);
+      $auto = $wpdb->get_col(
+        $wpdb->prepare("SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s LIMIT 5", "%{$slug_clean}%")
+      );
+      $options_to_read = $auto;
+    }
+
+    $config = [];
+    foreach ($options_to_read as $opt_key) {
+      $val = get_option($opt_key);
+      if ($val !== false) {
+        // Truncate large arrays/objects to avoid huge payloads
+        $encoded = json_encode($val);
+        $config[$opt_key] = strlen($encoded) > 2000
+          ? json_decode(substr($encoded, 0, 2000)) // truncate
+          : $val;
+      }
+    }
+
+    if (!empty($config)) {
+      $plugin_data = get_plugins()[$plugin_file] ?? [];
+      $plugin_configs[] = [
+        'slug'    => $slug,
+        'name'    => $plugin_data['Name'] ?? $slug,
+        'version' => $plugin_data['Version'] ?? '',
+        'config'  => $config,
+      ];
+    }
+  }
+
+  // ── 3. CUSTOM CODE ────────────────────────────────────────────────────────
+  $custom_code = [];
+
+  // Child theme functions.php
+  $child_functions = get_stylesheet_directory() . '/functions.php';
+  if (file_exists($child_functions)) {
+    $content = file_get_contents($child_functions);
+    $custom_code['child_theme_functions'] = [
+      'file'    => $child_functions,
+      'lines'   => substr_count($content, "\n"),
+      'content' => substr($content, 0, 8000), // first 8KB
+      'truncated' => strlen($content) > 8000,
+    ];
+  }
+
+  // Child theme style.css (contains theme metadata)
+  $child_style = get_stylesheet_directory() . '/style.css';
+  if (file_exists($child_style)) {
+    $content = file_get_contents($child_style);
+    $custom_code['child_theme_style'] = [
+      'file'    => $child_style,
+      'lines'   => substr_count($content, "\n"),
+      'content' => substr($content, 0, 3000),
+      'truncated' => strlen($content) > 3000,
+    ];
+  }
+
+  // Custom plugins (not from wp.org — directories in wp-content/plugins without readme.txt)
+  $plugins_dir = WP_PLUGIN_DIR;
+  $custom_plugins = [];
+  foreach (glob($plugins_dir . '/*/') as $dir) {
+    $plugin_slug = basename($dir);
+    // Skip known repo plugins — if no changelog/readme it might be custom
+    $is_custom = !file_exists($dir . 'readme.txt') && !file_exists($dir . 'README.txt');
+    if ($is_custom) {
+      // Find the main plugin file
+      foreach (glob($dir . '*.php') as $php_file) {
+        $header = file_get_contents($php_file, false, null, 0, 1000);
+        if (strpos($header, 'Plugin Name:') !== false) {
+          $custom_plugins[] = [
+            'slug'    => $plugin_slug,
+            'file'    => basename($php_file),
+            'content' => substr(file_get_contents($php_file), 0, 5000),
+            'truncated' => filesize($php_file) > 5000,
+          ];
+          break;
+        }
+      }
+    }
+  }
+  if ($custom_plugins) $custom_code['custom_plugins'] = $custom_plugins;
+
+  // Active must-use plugins (wp-content/mu-plugins)
+  $mu_dir = WPMU_PLUGIN_DIR;
+  $mu_plugins = [];
+  if (is_dir($mu_dir)) {
+    foreach (glob($mu_dir . '/*.php') as $mu_file) {
+      $content = file_get_contents($mu_file);
+      $mu_plugins[] = [
+        'file'      => basename($mu_file),
+        'content'   => substr($content, 0, 3000),
+        'truncated' => strlen($content) > 3000,
+      ];
+    }
+  }
+  if ($mu_plugins) $custom_code['mu_plugins'] = $mu_plugins;
+
+  // WooCommerce custom hooks / shortcodes registered in functions.php
+  // (surface any add_action / add_filter / add_shortcode calls from child theme)
+  if (isset($custom_code['child_theme_functions'])) {
+    $fc = $custom_code['child_theme_functions']['content'];
+    preg_match_all('/add_(action|filter|shortcode)\s*\(\s*[\'"]([^\'"]+)[\'"]/', $fc, $hooks);
+    if (!empty($hooks[2])) {
+      $custom_code['registered_hooks'] = array_map(null, $hooks[1], $hooks[2]);
+    }
+  }
+
+  return rest_ensure_response([
+    'db_schema'      => $db_schema,
+    'plugin_configs' => $plugin_configs,
+    'custom_code'    => $custom_code,
+  ]);
 }
 
 // ── /delete-post DELETE ───────────────────────────────────────────────────

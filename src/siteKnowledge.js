@@ -70,6 +70,27 @@ async function buildKnowledge() {
     console.log(`  ✅ Custom post types: ${kb.custom_post_types.map(c => c.slug).join(', ')}`);
   }
 
+  // ── Extended info: DB schema, plugin configs, custom code ─────────────────
+  console.log('  🔍 Fetching extended info (DB schema, plugin configs, custom code)...');
+  try {
+    const extRes = await axios.get(
+      `${WP_BASE()}/wp-json/brinda-agent/v1/extended-info`,
+      { headers: agentHdrs(), timeout: 30000 }
+    );
+    kb.db_schema      = extRes.data.db_schema      || [];
+    kb.plugin_configs = extRes.data.plugin_configs || [];
+    kb.custom_code    = extRes.data.custom_code    || {};
+
+    const customTables = kb.db_schema.filter(t => !t.is_core);
+    console.log(`  ✅ DB tables: ${kb.db_schema.length} total | Custom/plugin tables: ${customTables.length}`);
+    console.log(`  ✅ Plugin configs: ${kb.plugin_configs.length} plugins with stored settings`);
+    const codeKeys = Object.keys(kb.custom_code);
+    console.log(`  ✅ Custom code: ${codeKeys.join(', ') || 'none'}`);
+  } catch (e) {
+    console.warn(`  ⚠️  Extended info fetch failed: ${e.message.split('\n')[0]}`);
+    kb.db_schema = []; kb.plugin_configs = []; kb.custom_code = {};
+  }
+
   fs.writeFileSync(KNOWLEDGE_FILE, JSON.stringify(kb, null, 2));
   console.log(`\n✅ Knowledge base saved → ${KNOWLEDGE_FILE}`);
   console.log(`   Pages: ${kb.pages.length} | Elementor: ${kb.elementor_pages.length} | Menus: ${kb.menus.length} | Active plugins: ${active.length}`);
@@ -157,6 +178,53 @@ function getContextForTask(taskType, kb) {
 
   lines.push('### Active Theme');
   lines.push(`  Child: ${kb.theme?.child}  |  Parent: ${kb.theme?.parent}`);
+
+  // ── DB Schema (custom/plugin tables only — not WP core) ───────────────────
+  const customTables = (kb.db_schema || []).filter(t => !t.is_core);
+  if (customTables.length && ['plugin', 'content', 'elementor', 'seo'].includes(taskType)) {
+    lines.push('');
+    lines.push(`### Database — Custom & Plugin Tables (${customTables.length})`);
+    customTables.forEach(t => {
+      const cols = (t.columns || []).map(c => `${c.name}(${c.type})`).join(', ');
+      lines.push(`  • ${t.table}${cols ? `: ${cols.substring(0, 120)}` : ''}`);
+    });
+  }
+
+  // ── Plugin configs (show key settings per plugin) ─────────────────────────
+  if ((kb.plugin_configs || []).length && ['plugin', 'seo', 'elementor', 'content'].includes(taskType)) {
+    lines.push('');
+    lines.push('### Plugin Configurations');
+    (kb.plugin_configs || []).forEach(p => {
+      lines.push(`  • ${p.name} v${p.version}`);
+      Object.entries(p.config || {}).slice(0, 4).forEach(([k, v]) => {
+        const val = typeof v === 'object' ? JSON.stringify(v).substring(0, 80) : String(v).substring(0, 80);
+        lines.push(`    ${k}: ${val}`);
+      });
+    });
+  }
+
+  // ── Custom code (child theme functions + hooks) ───────────────────────────
+  if (kb.custom_code?.registered_hooks?.length && ['file', 'content', 'elementor'].includes(taskType)) {
+    lines.push('');
+    lines.push('### Child Theme Registered Hooks');
+    kb.custom_code.registered_hooks.slice(0, 20).forEach(([type, name]) => {
+      lines.push(`  • add_${type}: ${name}`);
+    });
+  }
+  if (kb.custom_code?.child_theme_functions && taskType === 'file') {
+    lines.push('');
+    lines.push('### Child Theme functions.php (first 3KB)');
+    lines.push('```php');
+    lines.push((kb.custom_code.child_theme_functions.content || '').substring(0, 3000));
+    lines.push('```');
+  }
+  if ((kb.custom_code?.custom_plugins || []).length) {
+    lines.push('');
+    lines.push('### Custom Plugins (non-repo)');
+    (kb.custom_code.custom_plugins || []).forEach(p => {
+      lines.push(`  • ${p.slug}/${p.file}`);
+    });
+  }
 
   return lines.join('\n');
 }
