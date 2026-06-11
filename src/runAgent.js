@@ -27,6 +27,47 @@ function withKb(systemContent, kbCtx) {
   return `${kbCtx}\n\n---\n\n${systemContent}`;
 }
 
+// ── Module-level helpers (used by both runAgent and redoTask) ─────────────────
+
+async function uploadImageToWP(imageUrl, filename) {
+  const FormData = require('form-data');
+  const wpAuth   = { username: process.env.WP_USERNAME, password: process.env.WP_APP_PASSWORD };
+  const WP_BASE  = process.env.WP_STAGING_URL;
+  const imgRes   = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 20000 });
+  const form     = new FormData();
+  form.append('file', Buffer.from(imgRes.data), { filename, contentType: imgRes.headers['content-type'] || 'image/jpeg' });
+  const uploadRes = await axios.post(`${WP_BASE}/wp-json/wp/v2/media`, form, {
+    auth: wpAuth, headers: form.getHeaders(), maxContentLength: Infinity
+  });
+  console.log(`✅ Uploaded image: ${uploadRes.data.source_url}`);
+  return { id: uploadRes.data.id, url: uploadRes.data.source_url };
+}
+
+async function searchImage(query) {
+  const unsplashKey = process.env.UNSPLASH_ACCESS_KEY;
+  if (unsplashKey) {
+    const r = await axios.get('https://api.unsplash.com/search/photos', {
+      headers: { Authorization: `Client-ID ${unsplashKey}` },
+      params: { query, per_page: 3, orientation: 'landscape' }
+    });
+    const photo = r.data?.results?.[0];
+    if (photo) return { url: photo.urls.regular, credit: `Photo by ${photo.user.name} on Unsplash` };
+  }
+  const pexelsKey = process.env.PEXELS_API_KEY;
+  if (pexelsKey) {
+    const r = await axios.get('https://api.pexels.com/v1/search', {
+      headers: { Authorization: pexelsKey },
+      params: { query, per_page: 3, orientation: 'landscape' }
+    });
+    const photo = r.data?.photos?.[0];
+    if (photo) return { url: photo.src.large, credit: `Photo by ${photo.photographer} on Pexels` };
+  }
+  // Fallback: Unsplash random (no API key needed)
+  return { url: `https://source.unsplash.com/800x600/?${encodeURIComponent(query)}`, credit: 'Photo via Unsplash' };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function runAgent(issueKey, feedbackContext = null, forcedTaskType = null) {
   const isReroute = !!forcedTaskType; // skip duplicate comment/transition on re-routes
   console.log(`\n🤖 Processing Jira issue: ${issueKey}${isReroute ? ` (re-route → ${forcedTaskType})` : ''}`);
@@ -1462,43 +1503,6 @@ Return JSON: {
             entry = parent;
           }
           return null;
-        }
-
-        // ── Helper: upload an image to WP Media Library ───────────────────────
-        async function uploadImageToWP(imageUrl, filename) {
-          const FormData = require('form-data');
-          const imgRes = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 20000 });
-          const form   = new FormData();
-          form.append('file', Buffer.from(imgRes.data), { filename, contentType: imgRes.headers['content-type'] || 'image/jpeg' });
-          const uploadRes = await axios.post(`${WP_BASE}/wp-json/wp/v2/media`, form, {
-            auth: wpAuth, headers: form.getHeaders(), maxContentLength: Infinity
-          });
-          console.log(`✅ Uploaded image: ${uploadRes.data.source_url}`);
-          return { id: uploadRes.data.id, url: uploadRes.data.source_url };
-        }
-
-        // ── Helper: search Pexels for an image (uses PEXELS_API_KEY env var) ──
-        async function searchImage(query) {
-          const unsplashKey = process.env.UNSPLASH_ACCESS_KEY;
-          if (unsplashKey) {
-            const r = await axios.get('https://api.unsplash.com/search/photos', {
-              headers: { Authorization: `Client-ID ${unsplashKey}` },
-              params: { query, per_page: 3, orientation: 'landscape' }
-            });
-            const photo = r.data?.results?.[0];
-            if (photo) return { url: photo.urls.regular, credit: `Photo by ${photo.user.name} on Unsplash` };
-          }
-          const pexelsKey = process.env.PEXELS_API_KEY;
-          if (pexelsKey) {
-            const r = await axios.get('https://api.pexels.com/v1/search', {
-              headers: { Authorization: pexelsKey },
-              params: { query, per_page: 3, orientation: 'landscape' }
-            });
-            const photo = r.data?.photos?.[0];
-            if (photo) return { url: photo.src.large, credit: `Photo by ${photo.photographer} on Pexels` };
-          }
-          // Fallback: Unsplash random (no API key needed)
-          return { url: `https://source.unsplash.com/800x600/?${encodeURIComponent(query)}`, credit: 'Photo via Unsplash' };
         }
 
         // ── Build indexed widget list (with elId for tree traversal) ─────────
