@@ -10,7 +10,9 @@
  * Returns a structured PageMap that GPT uses to choose the right approach.
  */
 
-const { runWpCli } = require('./wpCli');
+const axios   = require('axios');
+const WP_BASE = () => process.env.WP_STAGING_URL;
+const wpAuth  = () => ({ username: process.env.WP_USERNAME, password: process.env.WP_APP_PASSWORD });
 
 // ── CPT shortcode → WP post_type mapping ─────────────────────────────────────
 const CPT_WIDGET_MAP = {
@@ -21,12 +23,16 @@ const CPT_WIDGET_MAP = {
   trx_sc_price:     'cpt_price',
 };
 
-// ── Parse Elementor JSON via WP CLI ──────────────────────────────────────────
+// ── Read Elementor JSON via REST API ─────────────────────────────────────────
 async function getElementorJson(postId) {
   try {
-    const raw = await runWpCli(`post meta get ${postId} _elementor_data`);
-    if (!raw || raw.trim() === '') return null;
-    return JSON.parse(raw.trim());
+    const res = await axios.get(
+      `${WP_BASE()}/wp-json/brinda-agent/v1/elementor-data`,
+      { auth: wpAuth(), params: { post_id: postId }, timeout: 20000 }
+    );
+    const raw = res.data?.elementor_data;
+    if (!raw || raw === '') return null;
+    return JSON.parse(raw);
   } catch (e) {
     console.warn(`⚠️ Could not read Elementor JSON for post ${postId}: ${e.message}`);
     return null;
@@ -91,31 +97,21 @@ function mapWidgets(elements, results = [], depth = 0) {
   return results;
 }
 
-// ── Fetch CPT posts for a category ───────────────────────────────────────────
+// ── Fetch CPT posts for a category via REST API ───────────────────────────────
 async function getCptPostsInCategory(cptType, catId) {
   try {
-    // Find the taxonomy for this CPT (usually cptType + '_group')
-    const taxSlug = `${cptType}_group`;
-    const out = await runWpCli(
-      `post list --post_type=${cptType} --tax_query[0][taxonomy]=${taxSlug} --tax_query[0][terms]=${catId} --fields=ID,post_title,post_status --format=json`
+    const res = await axios.get(
+      `${WP_BASE()}/wp-json/brinda-agent/v1/cpt-posts`,
+      { auth: wpAuth(), params: { post_type: cptType, cat_id: catId }, timeout: 15000 }
     );
-    return JSON.parse(out || '[]').map(p => ({
-      id:     parseInt(p.ID),
-      title:  p.post_title,
-      status: p.post_status,
+    return (res.data?.posts || []).map(p => ({
+      id:     p.id,
+      title:  p.title,
+      status: p.status,
     }));
-  } catch {
-    // Fallback: list all posts of this type
-    try {
-      const out = await runWpCli(`post list --post_type=${cptType} --fields=ID,post_title,post_status --format=json`);
-      return JSON.parse(out || '[]').map(p => ({
-        id:     parseInt(p.ID),
-        title:  p.post_title,
-        status: p.post_status,
-      }));
-    } catch {
-      return [];
-    }
+  } catch (e) {
+    console.warn(`⚠️ Could not fetch CPT posts for ${cptType} cat ${catId}: ${e.message}`);
+    return [];
   }
 }
 
@@ -142,7 +138,7 @@ async function getCptPostsInCategory(cptType, catId) {
  * }
  */
 async function inspectPage(postId) {
-  console.log(`🔬 Inspecting page ${postId} via SSH...`);
+  console.log(`🔬 Inspecting page ${postId} via REST API...`);
 
   const data = await getElementorJson(postId);
   if (!data) {

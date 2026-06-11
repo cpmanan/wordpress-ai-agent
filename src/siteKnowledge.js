@@ -1,8 +1,8 @@
 /**
  * siteKnowledge.js
  *
- * Builds a structured knowledge base of the WordPress site via WP CLI over SSH.
- * SSH connection is now confirmed working (Railway → WP Engine).
+ * Builds a structured knowledge base of the WordPress site.
+ * Uses the brinda-agent REST API plugin (HTTPS) — no SSH needed.
  *
  * Captures:
  *   - All pages (ID, title, slug, status, template, Elementor flag)
@@ -17,163 +17,64 @@
 
 const fs   = require('fs');
 const path = require('path');
+const axios = require('axios');
 
 const KNOWLEDGE_FILE = path.join(__dirname, '..', 'site-knowledge.json');
 
-// ── WP CLI helpers ────────────────────────────────────────────────────────────
-
-async function cliJson(runWpCli, cmd) {
-  try {
-    const out = await runWpCli(cmd + ' --format=json');
-    return JSON.parse(out || '[]');
-  } catch (e) {
-    console.warn(`  ⚠️  WP CLI "${cmd.substring(0, 60)}": ${e.message.split('\n')[0]}`);
-    return [];
-  }
-}
-
-async function cliVal(runWpCli, cmd) {
-  try {
-    return (await runWpCli(cmd)).trim();
-  } catch {
-    return '';
-  }
-}
+const WP_BASE = () => process.env.WP_STAGING_URL;
+const wpAuth  = () => ({
+  username: process.env.WP_USERNAME,
+  password: process.env.WP_APP_PASSWORD,
+});
 
 // ── Main builder ──────────────────────────────────────────────────────────────
 
 async function buildKnowledge() {
-  const { runWpCli } = require('./wpCli');
-  console.log('🔍 Building site knowledge base via SSH + WP CLI...');
+  console.log('🔍 Building site knowledge base via REST API...');
+
+  let siteInfo;
+  try {
+    const res = await axios.get(
+      `${WP_BASE()}/wp-json/brinda-agent/v1/site-info`,
+      { auth: wpAuth(), timeout: 30000 }
+    );
+    siteInfo = res.data;
+  } catch (err) {
+    const msg = err.response?.data?.message || err.message;
+    throw new Error(`Could not fetch site info: ${msg}`);
+  }
 
   const kb = {
     generated_at:      new Date().toISOString(),
-    site:              {},
-    pages:             [],
-    posts:             [],
-    menus:             [],
-    plugins:           [],
-    theme:             {},
-    custom_post_types: [],
-    elementor_pages:   [],
-    front_page_id:     null,
-    blog_page_id:      null,
+    site:              siteInfo.site              || {},
+    pages:             siteInfo.pages             || [],
+    posts:             siteInfo.posts             || [],
+    menus:             siteInfo.menus             || [],
+    plugins:           siteInfo.plugins           || [],
+    theme:             siteInfo.theme             || {},
+    custom_post_types: siteInfo.custom_post_types || [],
+    elementor_pages:   siteInfo.elementor_pages   || [],
+    front_page_id:     siteInfo.front_page_id     || null,
+    blog_page_id:      siteInfo.blog_page_id      || null,
   };
 
-  // ── 1. Site options — single WP CLI call to avoid parallel connection races ──
-  // wp eval echoes all options as JSON in one SSH round-trip
-  let blogname = '', siteurl = '', frontPageId = '', blogPageId = '', template = '', stylesheet = '';
-  try {
-    const optJson = await runWpCli(
-      `eval 'echo json_encode(["blogname"=>get_option("blogname"),"siteurl"=>get_option("siteurl"),"page_on_front"=>get_option("page_on_front"),"page_for_posts"=>get_option("page_for_posts"),"template"=>get_option("template"),"stylesheet"=>get_option("stylesheet")]);'`
-    );
-    const opts = JSON.parse(optJson || '{}');
-    blogname   = opts.blogname      || '';
-    siteurl    = opts.siteurl       || '';
-    frontPageId = String(opts.page_on_front  || '');
-    blogPageId  = String(opts.page_for_posts || '');
-    template   = opts.template      || '';
-    stylesheet = opts.stylesheet    || '';
-  } catch (e) {
-    console.warn(`  ⚠️  Could not fetch site options: ${e.message.split('\n')[0]}`);
-  }
-
-  kb.site          = { blogname, siteurl };
-  kb.front_page_id = parseInt(frontPageId) || null;
-  kb.blog_page_id  = parseInt(blogPageId)  || null;
-  kb.theme         = { child: stylesheet, parent: template };
-  console.log(`  ✅ Site: "${blogname}" (${siteurl})`);
-  console.log(`  ✅ Theme: child=${stylesheet}  parent=${template}`);
-  console.log(`  ✅ Front page ID: ${kb.front_page_id}`);
-
-  // ── 2. All pages ───────────────────────────────────────────────────────
-  const rawPages = await cliJson(runWpCli,
-    'post list --post_type=page --post_status=publish,draft --fields=ID,post_title,post_name,post_status,page_template --posts_per_page=-1'
-  );
-  kb.pages = rawPages.map(p => ({
-    id:       parseInt(p.ID),
-    title:    p.post_title,
-    slug:     p.post_name,
-    status:   p.post_status,
-    template: p.page_template || 'default',
-  }));
-  console.log(`  ✅ Pages: ${kb.pages.length}`);
-
-  // ── 3. Elementor pages ─────────────────────────────────────────────────
-  const rawElem = await cliJson(runWpCli,
-    'post list --post_type=page --meta_key=_elementor_edit_mode --meta_value=builder --fields=ID,post_title,post_name --posts_per_page=-1'
-  );
-  kb.elementor_pages = rawElem.map(p => ({
-    id:    parseInt(p.ID),
-    title: p.post_title,
-    slug:  p.post_name,
-  }));
-  const elemIds = new Set(kb.elementor_pages.map(p => p.id));
-  kb.pages.forEach(p => {
-    p.uses_elementor = elemIds.has(p.id);
-    p.is_front_page  = p.id === kb.front_page_id;
-  });
-  console.log(`  ✅ Elementor pages: ${kb.elementor_pages.length}`);
-
-  // ── 4. Recent posts ────────────────────────────────────────────────────
-  const rawPosts = await cliJson(runWpCli,
-    'post list --post_type=post --post_status=publish --fields=ID,post_title,post_name,post_date --posts_per_page=30'
-  );
-  kb.posts = rawPosts.map(p => ({
-    id:    parseInt(p.ID),
-    title: p.post_title,
-    slug:  p.post_name,
-    date:  p.post_date,
-  }));
-  console.log(`  ✅ Posts: ${kb.posts.length} recent`);
-
-  // ── 5. Navigation menus ────────────────────────────────────────────────
-  const rawMenus = await cliJson(runWpCli, 'menu list --fields=term_id,name,slug,count');
-  kb.menus = [];
-  for (const menu of rawMenus) {
-    const items = await cliJson(runWpCli,
-      `menu item list "${menu.name}" --fields=ID,title,url,object,object_id,menu_item_parent`
-    );
-    kb.menus.push({
-      id:    parseInt(menu.term_id),
-      name:  menu.name,
-      slug:  menu.slug,
-      items: items.map(i => ({
-        id:        parseInt(i.ID),
-        title:     i.title,
-        url:       i.url,
-        type:      i.object,
-        object_id: parseInt(i.object_id),
-        parent_id: parseInt(i.menu_item_parent) || null,
-      })),
-    });
-  }
-  console.log(`  ✅ Menus: ${kb.menus.length} (${kb.menus.map(m => m.name).join(', ')})`);
-
-  // ── 6. Plugins ─────────────────────────────────────────────────────────
-  const rawPlugins = await cliJson(runWpCli, 'plugin list --fields=name,title,status,version');
-  kb.plugins = rawPlugins.map(p => ({
-    slug:    p.name,
-    title:   p.title,
-    status:  p.status,
-    version: p.version,
-  }));
   const active = kb.plugins.filter(p => p.status === 'active');
-  console.log(`  ✅ Plugins: ${kb.plugins.length} total | Active: ${active.map(p => p.title).slice(0, 6).join(', ')}`);
 
-  // ── 7. Custom post types ───────────────────────────────────────────────
-  const rawCpts = await cliJson(runWpCli, 'post-type list --fields=name,label,public');
-  kb.custom_post_types = rawCpts
-    .filter(c => c.public === '1' && !['post', 'page', 'attachment'].includes(c.name))
-    .map(c => ({ slug: c.name, label: c.label }));
+  console.log(`  ✅ Site: "${kb.site.blogname}" (${kb.site.siteurl})`);
+  console.log(`  ✅ Theme: child=${kb.theme.child}  parent=${kb.theme.parent}`);
+  console.log(`  ✅ Front page ID: ${kb.front_page_id}`);
+  console.log(`  ✅ Pages: ${kb.pages.length}`);
+  console.log(`  ✅ Elementor pages: ${kb.elementor_pages.length}`);
+  console.log(`  ✅ Posts: ${kb.posts.length} recent`);
+  console.log(`  ✅ Menus: ${kb.menus.length} (${kb.menus.map(m => m.name).join(', ')})`);
+  console.log(`  ✅ Plugins: ${kb.plugins.length} total | Active: ${active.map(p => p.title).slice(0, 6).join(', ')}`);
   if (kb.custom_post_types.length) {
     console.log(`  ✅ Custom post types: ${kb.custom_post_types.map(c => c.slug).join(', ')}`);
   }
 
-  // ── Save ──────────────────────────────────────────────────────────────
   fs.writeFileSync(KNOWLEDGE_FILE, JSON.stringify(kb, null, 2));
   console.log(`\n✅ Knowledge base saved → ${KNOWLEDGE_FILE}`);
-  console.log(`   Pages: ${kb.pages.length} | Elementor: ${kb.elementor_pages.length} | Menus: ${kb.menus.length} | Plugins active: ${active.length}`);
+  console.log(`   Pages: ${kb.pages.length} | Elementor: ${kb.elementor_pages.length} | Menus: ${kb.menus.length} | Active plugins: ${active.length}`);
 
   return kb;
 }
