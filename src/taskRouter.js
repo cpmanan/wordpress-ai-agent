@@ -61,7 +61,8 @@ const PLUGIN_KEYWORDS = [
 
 const BACKUP_KEYWORDS = [
   'update plugin', 'update wordpress', 'update core', 'wordpress update',
-  'plugin update', 'upgrade plugin', 'upgrade wordpress'
+  'plugin update', 'upgrade plugin', 'upgrade wordpress',
+  'with auto-backup', 'with backup',
 ];
 
 const ELEMENTOR_KEYWORDS = [
@@ -109,6 +110,10 @@ function detectTaskType(title, description = '') {
 
   // Check most specific first
   if (BACKUP_KEYWORDS.some(k => text.includes(k)))       return TASK_TYPES.BACKUP;
+
+  // "update X plugin" — plugin name between "update" and "plugin" (e.g. "Update Contact Form 7 plugin")
+  if (/\bupdate\b.{1,40}\bplugin\b/.test(text))          return TASK_TYPES.BACKUP;
+  if (/\bupgrade\b.{1,40}\bplugin\b/.test(text))         return TASK_TYPES.BACKUP;
   if (PLUGIN_KEYWORDS.some(k => text.includes(k)))       return TASK_TYPES.PLUGIN;
 
   // Domain-specific CPT types before generic content

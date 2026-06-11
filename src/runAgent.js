@@ -1927,17 +1927,26 @@ Return JSON: { "clone_from_widget_index": <index from the list below>, "new_head
               break;
             }
 
-            // Confident enough — let GPT pick
-            const r = await getOpenAI().chat.completions.create({
-              model: 'gpt-4o',
-              messages: [
-                { role: 'system', content: withKb(`You are an Elementor widget editor.
-Return JSON: { "widget_index": <number from the list>, "new_text": "replacement text", "what_changed": "brief description" }`, fullContext) },
-                { role: 'user', content: `Task: ${title}\n\nDetails: ${description}\n\nPage: "${elemPage.title?.rendered}"\n\nWidgets:\n${JSON.stringify(widgetSummary, null, 2).substring(0, 8000)}` }
-              ],
-              response_format: { type: 'json_object' }
-            });
-            elemResult = { action: 'edit', ...JSON.parse(r.choices[0].message.content) };
+            // Only 1 editable widget — auto-select it, no need to ask GPT for the index
+            // (avoids hallucination where GPT confuses widgetRefs index with page structure position)
+            if (editableWidgets.length === 1) {
+              elemResult = { action: 'edit', widget_index: editableWidgets[0].index };
+              // will fall through to the "widget chosen but no new_text" block to generate content
+            } else {
+              // Multiple candidates — let GPT pick from the list
+              // IMPORTANT: widget_index must be one of the index values shown in the Widgets list below
+              const r = await getOpenAI().chat.completions.create({
+                model: 'gpt-4o',
+                messages: [
+                  { role: 'system', content: withKb(`You are an Elementor widget editor.
+IMPORTANT: widget_index MUST be one of the exact "index" values from the Widgets list provided.
+Return JSON: { "widget_index": <index value from the list>, "new_text": "replacement text", "what_changed": "brief description" }`, fullContext) },
+                  { role: 'user', content: `Task: ${title}\n\nDetails: ${description}\n\nPage: "${elemPage.title?.rendered}"\n\nWidgets (pick widget_index from these exact index values):\n${JSON.stringify(widgetSummary, null, 2).substring(0, 8000)}` }
+                ],
+                response_format: { type: 'json_object' }
+              });
+              elemResult = { action: 'edit', ...JSON.parse(r.choices[0].message.content) };
+            }
           }
 
           // If GPT chose a widget but no new_text yet (forced index case) — ask GPT for content only
