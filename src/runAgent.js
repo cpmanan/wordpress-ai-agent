@@ -1043,36 +1043,50 @@ add_action('rest_api_init', function() {
           timestamp: new Date().toISOString()
         });
 
-        // 5. Ask GPT to modify the Elementor JSON
+        // 5. Ask GPT to identify WHAT to change and WHERE — NOT to rewrite the JSON
+        // We pass a summary of widget texts, GPT tells us the target value + new value,
+        // then Node.js does the surgical find-and-replace in the parsed JSON.
+        const parsed = JSON.parse(typeof elementorData === 'string' ? elementorData : JSON.stringify(elementorData));
+
+        // Flatten all widgets recursively to build a summary for GPT
+        function flattenWidgets(elements, path = '') {
+          const widgets = [];
+          for (let i = 0; i < (elements || []).length; i++) {
+            const el = elements[i];
+            const elPath = `${path}[${i}]`;
+            if (el.elType === 'widget') {
+              const s = el.settings || {};
+              const text = s.title || s.editor || s.text || s.description || s.caption || null;
+              if (text) widgets.push({ path: elPath, widgetType: el.widgetType, text: text.substring(0, 200) });
+            }
+            if (el.elements?.length) widgets.push(...flattenWidgets(el.elements, `${elPath}.elements`));
+          }
+          return widgets;
+        }
+
+        const widgetSummary = flattenWidgets(parsed);
+        console.log(`📋 Found ${widgetSummary.length} text widgets in Elementor data`);
+
         const elemResponse = await getOpenAI().chat.completions.create({
           model: 'gpt-4o',
           messages: [
             {
               role: 'system',
-              content: `You are an Elementor page builder editor. You will receive Elementor JSON data (_elementor_data) and a task describing what to change.
-
-Your job:
-1. Parse the Elementor JSON (array of sections/columns/widgets)
-2. Find the specific widget(s) matching the task description
-3. Make ONLY the requested text/content change — do NOT change any styles, settings, or other widgets
-4. Return the complete modified JSON
-
-Elementor widget types to look for:
-- "heading" widgets: text is in settings.title
-- "text-editor" widgets: text is in settings.editor
-- "button" widgets: text is in settings.text
-- "image" widgets: alt text in settings.image.alt
+              content: `You are an Elementor editor assistant. Given a list of text widgets on a page and a task, identify which widget to change and what the new text should be.
 
 Return JSON: {
-  "elementor_data": "<complete modified JSON string>",
   "changed": true or false,
-  "widget_type": "the widget type you changed",
+  "widget_path": "the exact path string from the list (e.g. [0].elements[1].elements[0])",
+  "widget_type": "heading|text-editor|button|etc",
+  "field": "title|editor|text|description",
+  "old_text": "the current text value (first 100 chars)",
+  "new_text": "the replacement text",
   "what_changed": "brief description"
 }`
             },
             {
               role: 'user',
-              content: `Task: ${title}\n\nDetails: ${description}\n\nPage: "${elemPage.title?.rendered}" (ID: ${elemPage.id})\n\nElementor data:\n${typeof elementorData === 'string' ? elementorData.substring(0, 8000) : JSON.stringify(elementorData).substring(0, 8000)}`
+              content: `Task: ${title}\n\nDetails: ${description}\n\nPage: "${elemPage.title?.rendered}"\n\nText widgets on this page:\n${JSON.stringify(widgetSummary, null, 2).substring(0, 6000)}`
             }
           ],
           response_format: { type: 'json_object' }
@@ -1080,20 +1094,56 @@ Return JSON: {
 
         const elemResult = JSON.parse(elemResponse.choices[0].message.content);
 
-        if (!elemResult.changed) {
+        if (!elemResult.changed || !elemResult.widget_path) {
           await addComment(issueKey,
-            `⚠️ Could not find the widget to change in the Elementor data.\n\n` +
-            `Please be more specific about which section or text to update.\n` +
-            `Page: [${elemPage.title?.rendered}|${WP_BASE}/wp-admin/post.php?post=${elemPage.id}&action=elementor]`
+            `⚠️ Could not identify which widget to change.\n\n` +
+            `Please be more specific about which text to update.\n` +
+            `Available text widgets (first 5):\n${widgetSummary.slice(0, 5).map(w => `• [${w.widgetType}] "${w.text.substring(0, 80)}"`).join('\n')}\n\n` +
+            `Page: [Edit in Elementor|${WP_BASE}/wp-admin/post.php?post=${elemPage.id}&action=elementor]`
           );
           await transitionIssue(issueKey, 'In Review');
           break;
         }
 
-        // 6. Write updated Elementor data back
+        // 6. Apply the change surgically in Node.js — navigate the path and update only the field
+        function applyChange(elements, pathStr, field, newText) {
+          // pathStr like "[0].elements[1].elements[0]"
+          // We'll do a recursive find by matching current text instead of fragile path parsing
+          for (const el of (elements || [])) {
+            if (el.elType === 'widget') {
+              const current = el.settings?.[field];
+              if (current && current.includes(elemResult.old_text.substring(0, 50))) {
+                el.settings[field] = newText;
+                return true;
+              }
+            }
+            if (el.elements?.length && applyChange(el.elements, pathStr, field, newText)) return true;
+          }
+          return false;
+        }
+
+        const applied = applyChange(parsed, elemResult.widget_path, elemResult.field, elemResult.new_text);
+
+        if (!applied) {
+          // Fallback: try all common text fields
+          const fields = ['title', 'editor', 'text', 'description'];
+          let fallbackApplied = false;
+          for (const f of fields) {
+            if (applyChange(parsed, '', f, elemResult.new_text)) { fallbackApplied = true; break; }
+          }
+          if (!fallbackApplied) {
+            await addComment(issueKey, `⚠️ Could not apply the change — widget text not found in Elementor data. Please edit manually in Elementor.`);
+            await transitionIssue(issueKey, 'In Review');
+            break;
+          }
+        }
+
+        const updatedJson = JSON.stringify(parsed);
+
+        // 7. Write updated Elementor data back — only the changed widget's text is different
         await axios.post(`${WP_BASE}/wp-json/brinda-agent/v1/elementor-data`, {
-          post_id:       elemPage.id,
-          elementor_data: elemResult.elementor_data,
+          post_id:        elemPage.id,
+          elementor_data: updatedJson,
         }, { auth: wpAuth });
 
         console.log(`✅ Elementor data updated for page ${elemPage.id}: ${elemResult.what_changed}`);
