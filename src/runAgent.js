@@ -461,7 +461,12 @@ Return JSON: {
                 content: withKb(`You are a content writer for Brinda Yoga, a professional yoga studio website.
 Write an engaging, informative blog post that reflects the brand voice of a mindful yoga studio.
 Use well-structured HTML with headings, paragraphs, and lists where appropriate.
-Return JSON: { "title": "blog post title", "content": "full HTML content", "excerpt": "brief summary (1-2 sentences)" }`, kbContext)
+
+IMPORTANT: Do NOT include the post title as an H1 or H2 at the top of the content.
+The WordPress theme automatically displays the title above the content — adding it again causes it to appear twice on the page.
+Start the content directly with the first paragraph or an H2 sub-heading (not the main title).
+
+Return JSON: { "title": "blog post title", "content": "full HTML content (no title heading at top)", "excerpt": "brief summary (1-2 sentences)" }`, kbContext)
               },
               {
                 role: 'user',
@@ -472,7 +477,17 @@ Return JSON: { "title": "blog post title", "content": "full HTML content", "exce
           });
 
           const result = JSON.parse(aiResponse.choices[0].message.content);
-          const created = await createPost(result.title, result.content, 'draft', result.excerpt);
+
+          // Safety: strip leading title heading if GPT added it anyway
+          // WordPress theme renders the title automatically — having it in content = double title
+          let postContent = result.content || '';
+          const escapedTitle = result.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          postContent = postContent.replace(
+            new RegExp(`^\\s*<h[12][^>]*>\\s*${escapedTitle}\\s*</h[12]>\\s*`, 'i'),
+            ''
+          );
+
+          const created = await createPost(result.title, postContent, 'draft', result.excerpt);
           postId = created.id;
 
         } else {
