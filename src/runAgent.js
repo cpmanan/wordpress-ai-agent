@@ -1969,7 +1969,7 @@ Keep count between 1 and 5.` },
           const plan = JSON.parse(galleryPlan.choices[0].message.content);
           const searchQuery = plan.search_query || 'yoga meditation';
           const addCount    = Math.min(Math.max(1, plan.count || 3), 5);
-          console.log(`🔍 Searching Pexels for "${searchQuery}" — adding ${addCount} images`);
+          console.log(`🔍 Searching for images: "${searchQuery}" — adding ${addCount} images`);
 
           // Search for images using Unsplash (primary) → Pexels (fallback)
           // Unsplash: free API key from unsplash.com/developers
