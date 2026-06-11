@@ -10,6 +10,7 @@ const { revertTask } = require('./revert');
 const { getPlugins, installPlugin, deactivatePlugin, updateYoastSeo, exportDb } = require('./wpCli');
 const { getKnowledge, getContextForTask, isStale, buildKnowledge } = require('./siteKnowledge');
 const { recallPage, rememberPage, rememberWidgetLearning, rememberQuirk, recordOutcome, rememberErrorPattern, recordCorrection, getMemoryContext } = require('./agentMemory');
+const { createBackup, isConfigured: wpEngineConfigured } = require('./wpEngine');
 
 // Initialize lazily so missing key doesn't crash the server at startup
 let openai;
@@ -965,14 +966,40 @@ add_action('rest_api_init', function() {
           break;
         }
 
+        // ── Create WP Engine backup checkpoint before any install/deactivate ──
+        let pluginBackupId = null;
+        if (wpEngineConfigured()) {
+          try {
+            await addComment(issueKey, `🔒 Creating WP Engine backup checkpoint before plugin operation...`);
+            const bk = await createBackup(`Pre-plugin-op backup — ${issueKey}: ${pluginPlan.action} ${pluginPlan.pluginName}`);
+            pluginBackupId = bk.id;
+            await addComment(issueKey, `✅ Backup checkpoint created: \`${bk.id}\`\nProceeding with plugin operation...`);
+            await setRevertMeta(issueKey, {
+              type: 'plugin',
+              action: pluginPlan.action,
+              pluginSlug: pluginPlan.pluginSlug,
+              backupCheckpointId: bk.id,
+              timestamp: new Date().toISOString()
+            });
+          } catch (bkErr) {
+            await addComment(issueKey, `⚠️ Backup checkpoint failed: ${bkErr.message}\n\nAborting plugin operation for safety. Please create a manual backup in WP Engine portal and re-run.`);
+            await transitionIssue(issueKey, 'Done');
+            break;
+          }
+        } else {
+          console.warn(`⚠️ WP Engine API not configured — skipping backup checkpoint for ${issueKey}`);
+        }
+
         if (pluginPlan.action === 'install') {
           await installPlugin(pluginPlan.pluginSlug);
-          await setRevertMeta(issueKey, {
-            type: 'plugin',
-            action: 'install',
-            pluginSlug: pluginPlan.pluginSlug,
-            timestamp: new Date().toISOString()
-          });
+          if (!pluginBackupId) {
+            await setRevertMeta(issueKey, {
+              type: 'plugin',
+              action: 'install',
+              pluginSlug: pluginPlan.pluginSlug,
+              timestamp: new Date().toISOString()
+            });
+          }
           await transitionIssue(issueKey, 'Done');
           await addComment(issueKey,
             `✅ Plugin installed and activated: "${pluginPlan.pluginName}"\n\n` +
@@ -984,6 +1011,128 @@ add_action('rest_api_init', function() {
           await deactivatePlugin(pluginPlan.pluginSlug);
           await transitionIssue(issueKey, 'Done');
           await addComment(issueKey, `✅ Plugin deactivated: "${pluginPlan.pluginName}"`);
+        }
+        break;
+      }
+
+      // ── BACKUP: Plugin/core update with WP Engine backup checkpoint ──────
+      case TASK_TYPES.BACKUP: {
+        const backupPlanRes = await getOpenAI().chat.completions.create({
+          model: 'gpt-4o',
+          messages: [
+            {
+              role: 'system',
+              content: withKb(`You are a WordPress admin. Parse the update task and return JSON:
+{
+  "target": "plugin" or "core" or "all",
+  "pluginSlug": "slug-if-specific-plugin-or-null",
+  "pluginName": "Human readable name or null",
+  "description": "one-line summary of what is being updated"
+}`, kbContext)
+            },
+            { role: 'user', content: `Task: ${title}\nDescription: ${description}` }
+          ],
+          response_format: { type: 'json_object' }
+        });
+
+        const backupPlan = JSON.parse(backupPlanRes.choices[0].message.content);
+        console.log(`🔄 Backup/update plan: ${JSON.stringify(backupPlan)}`);
+
+        // Step 1: Create WP Engine backup checkpoint
+        if (!wpEngineConfigured()) {
+          await addComment(issueKey,
+            `⚠️ *WP Engine API not configured* — cannot create backup checkpoint.\n\n` +
+            `To enable Phase 4 backup safety:\n` +
+            `1. Go to WP Engine portal → My Profile → API Access\n` +
+            `2. Generate API credentials\n` +
+            `3. Add to Railway env vars:\n` +
+            `   • \`WP_ENGINE_API_USER\`\n` +
+            `   • \`WP_ENGINE_API_PASSWORD\`\n` +
+            `   • \`WP_ENGINE_INSTALL_ID\` (UUID from your install URL)\n\n` +
+            `*Aborting update — safety first.*`
+          );
+          await transitionIssue(issueKey, 'Done');
+          break;
+        }
+
+        let backupCheckpoint;
+        try {
+          await addComment(issueKey,
+            `🔒 *Phase 4 — Pre-update backup*\n` +
+            `Creating WP Engine backup checkpoint before updating: ${backupPlan.description}...`
+          );
+          backupCheckpoint = await createBackup(
+            `Pre-update backup — ${issueKey}: ${backupPlan.description}`
+          );
+          await addComment(issueKey,
+            `✅ Backup checkpoint created!\n\n` +
+            `• *Checkpoint ID:* \`${backupCheckpoint.id}\`\n` +
+            `• *Status:* ${backupCheckpoint.status}\n` +
+            `• *Created:* ${new Date(backupCheckpoint.created_at).toLocaleString()}\n\n` +
+            `Proceeding with update...`
+          );
+        } catch (bkErr) {
+          await addComment(issueKey,
+            `❌ Backup checkpoint failed: ${bkErr.message}\n\n` +
+            `*Aborting update for safety.* Please:\n` +
+            `1. Verify WP Engine API credentials in Railway env vars\n` +
+            `2. Create a manual backup in WP Engine portal\n` +
+            `3. Re-run this task once backup is confirmed`
+          );
+          await transitionIssue(issueKey, 'Done');
+          break;
+        }
+
+        // Step 2: Store checkpoint in revert meta
+        await setRevertMeta(issueKey, {
+          type: 'backup',
+          target: backupPlan.target,
+          pluginSlug: backupPlan.pluginSlug,
+          backupCheckpointId: backupCheckpoint.id,
+          timestamp: new Date().toISOString()
+        });
+
+        // Step 3: Perform the update
+        try {
+          if (backupPlan.target === 'plugin' && backupPlan.pluginSlug) {
+            // Update specific plugin via WP-CLI
+            const { runWpCli } = require('./wpCli');
+            const updateResult = await runWpCli(`plugin update ${backupPlan.pluginSlug} --format=json`);
+            await transitionIssue(issueKey, 'In Review');
+            await addComment(issueKey,
+              `✅ *Plugin updated successfully!*\n\n` +
+              `• *Plugin:* ${backupPlan.pluginName || backupPlan.pluginSlug}\n` +
+              `• *Backup ID:* \`${backupCheckpoint.id}\`\n\n` +
+              `If anything looks broken, restore from checkpoint in WP Engine portal → Backups.\n\n` +
+              `• \`revert\` — restore from backup checkpoint ${backupCheckpoint.id}`
+            );
+          } else if (backupPlan.target === 'core') {
+            const { runWpCli } = require('./wpCli');
+            await runWpCli('core update');
+            await transitionIssue(issueKey, 'In Review');
+            await addComment(issueKey,
+              `✅ *WordPress core updated!*\n\n` +
+              `• *Backup ID:* \`${backupCheckpoint.id}\`\n\n` +
+              `If anything looks broken, restore from checkpoint in WP Engine portal → Backups.`
+            );
+          } else {
+            // all plugins or ambiguous — update all
+            const { runWpCli } = require('./wpCli');
+            await runWpCli('plugin update --all');
+            await transitionIssue(issueKey, 'In Review');
+            await addComment(issueKey,
+              `✅ *All plugins updated!*\n\n` +
+              `• *Backup ID:* \`${backupCheckpoint.id}\`\n\n` +
+              `If anything looks broken, restore from checkpoint in WP Engine portal → Backups.`
+            );
+          }
+        } catch (updateErr) {
+          await addComment(issueKey,
+            `❌ Update failed: ${updateErr.message}\n\n` +
+            `*Backup checkpoint is intact:* \`${backupCheckpoint.id}\`\n` +
+            `Restore it in WP Engine portal → your install → Backup Points.`
+          );
+          await transitionIssue(issueKey, 'Done');
         }
         break;
       }
