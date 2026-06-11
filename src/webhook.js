@@ -183,6 +183,14 @@ app.post('/webhook/jira', async (req, res) => {
         await runAgent(issueKey);
       }
 
+      // ── section: <N> — answer to agent's section clarification question ──
+      const sectionReply = commentText.match(/^section:\s*(\d+)$/);
+      if (sectionReply) {
+        const sectionIndex = sectionReply[1];
+        console.log(`📌 Section clarification received for ${issueKey}: widget index ${sectionIndex}`);
+        await runAgent(issueKey, `section:${sectionIndex}`);
+      }
+
       // ── page: <ID> — answer to agent's page clarification question ──
       // Agent asks "which page?" → user replies "page: 193"
       const pageReply = commentText.match(/^page:\s*(\d+)$/);

@@ -1632,17 +1632,78 @@ Return JSON: { "clone_from_widget_index": <index from the list below>, "new_head
             elemResult = { action: 'add_card', ...JSON.parse(r.choices[0].message.content) };
           }
         } else {
-          // 6b. CALL 2 (edit) — show all widgets, ask GPT which one to update
-          const r = await getOpenAI().chat.completions.create({
-            model: 'gpt-4o',
-            messages: [
-              { role: 'system', content: withKb(`You are an Elementor widget editor.
+          // 6b. CALL 2 (edit) — check if a previous section clarification was given
+          // If user replied "section: 3" it was stored in feedbackContext as "section:3"
+          const sectionReply = feedbackContext?.match(/^section:(\d+)$/i);
+          const forcedWidgetIndex = sectionReply ? parseInt(sectionReply[1]) : null;
+
+          if (forcedWidgetIndex !== null) {
+            // User already answered the clarification — skip GPT, use forced index
+            console.log(`🎯 Using user-selected section index: ${forcedWidgetIndex}`);
+            elemResult = { action: 'edit', widget_index: forcedWidgetIndex, new_text: null, what_changed: 'User-selected section' };
+          } else {
+            // Score editable widgets against task keywords to detect ambiguity
+            const taskWords = (title + ' ' + description).toLowerCase().split(/\W+/).filter(w => w.length > 3);
+            const editableWidgets = widgetSummary.filter(w =>
+              ['text-editor', 'heading', 'trx_sc_title', 'text'].some(t => w.widgetType.includes(t))
+              && w.preview?.length > 10
+            );
+
+            const scoredWidgets = editableWidgets.map(w => ({
+              ...w,
+              score: taskWords.filter(word => w.preview.toLowerCase().includes(word)).length
+            })).sort((a, b) => b.score - a.score);
+
+            const topScore    = scoredWidgets[0]?.score || 0;
+            const secondScore = scoredWidgets[1]?.score || 0;
+            const isAmbiguous = editableWidgets.length > 2 && topScore < 2 && (topScore - secondScore) <= 0;
+
+            if (isAmbiguous && editableWidgets.length > 1) {
+              // Multiple paragraphs look equally relevant — ask user to pick
+              const options = editableWidgets.slice(0, 5).map((w, i) =>
+                `*${w.index}.* [${w.widgetType}] "${w.preview.substring(0, 80)}${w.preview.length > 80 ? '…' : ''}"`
+              ).join('\n');
+
+              await addComment(issueKey,
+                `🤔 I found ${editableWidgets.length} text sections on this page. Which one should I update?\n\n` +
+                `${options}\n\n` +
+                `Reply with: \`section: <number>\` — e.g. \`section: ${editableWidgets[0]?.index}\``
+              );
+              await transitionIssue(issueKey, 'In Review');
+              break;
+            }
+
+            // Confident enough — let GPT pick
+            const r = await getOpenAI().chat.completions.create({
+              model: 'gpt-4o',
+              messages: [
+                { role: 'system', content: withKb(`You are an Elementor widget editor.
 Return JSON: { "widget_index": <number from the list>, "new_text": "replacement text", "what_changed": "brief description" }`, fullContext) },
-              { role: 'user', content: `Task: ${title}\n\nDetails: ${description}\n\nPage: "${elemPage.title?.rendered}"\n\nWidgets:\n${JSON.stringify(widgetSummary, null, 2).substring(0, 8000)}` }
-            ],
-            response_format: { type: 'json_object' }
-          });
-          elemResult = { action: 'edit', ...JSON.parse(r.choices[0].message.content) };
+                { role: 'user', content: `Task: ${title}\n\nDetails: ${description}\n\nPage: "${elemPage.title?.rendered}"\n\nWidgets:\n${JSON.stringify(widgetSummary, null, 2).substring(0, 8000)}` }
+              ],
+              response_format: { type: 'json_object' }
+            });
+            elemResult = { action: 'edit', ...JSON.parse(r.choices[0].message.content) };
+          }
+
+          // If GPT chose a widget but no new_text yet (forced index case) — ask GPT for content only
+          if (elemResult.widget_index != null && !elemResult.new_text) {
+            const tw = widgetRefs[elemResult.widget_index];
+            if (tw) {
+              const r2 = await getOpenAI().chat.completions.create({
+                model: 'gpt-4o',
+                messages: [
+                  { role: 'system', content: withKb(`You are a WordPress content writer for Brinda Yoga.
+Write replacement text for the specified widget. Return JSON: { "new_text": "...", "what_changed": "..." }`, fullContext) },
+                  { role: 'user', content: `Task: ${title}\n\nDetails: ${description}\n\nCurrent text: "${tw.preview}"` }
+                ],
+                response_format: { type: 'json_object' }
+              });
+              const r2data = JSON.parse(r2.choices[0].message.content);
+              elemResult.new_text    = r2data.new_text;
+              elemResult.what_changed = r2data.what_changed;
+            }
+          }
         }
 
         console.log(`🤖 GPT Elementor result:`, JSON.stringify(elemResult));
