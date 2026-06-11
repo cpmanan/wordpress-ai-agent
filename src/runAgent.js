@@ -1252,7 +1252,12 @@ Return JSON: {
                   }
                 }
                 if (!countBumped) {
-                  console.log(`⚠️  No count field found/bumped in ${el.widgetType}. All settings: ${JSON.stringify(s).substring(0, 300)}`);
+                  // ThemeREX may use the default (3) without writing the field to JSON.
+                  // Explicitly set size = existingPostCount + 1 so the new card shows.
+                  const newTotal = existingPosts.length + 1;
+                  s.size = String(newTotal);
+                  countBumped = true;
+                  console.log(`📈 Set ${el.widgetType}.size explicitly to ${newTotal} (was using default, not stored in JSON)`);
                 }
               }
               bumpCount(el.elements);
