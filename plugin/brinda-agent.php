@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Brinda Agent API
  * Description: REST API endpoints for the WordPress AI Agent (Railway → WP Engine over HTTPS)
- * Version: 2.6
+ * Version: 2.7
  * Author: Brinda AI Agent
  */
 
@@ -932,8 +932,18 @@ function brinda_install_plugin(WP_REST_Request $request) {
   }
 
   if (!$plugin_file) {
+    // Debug: list what's actually in the plugin directory
+    $plugin_dir  = WP_PLUGIN_DIR . '/' . $plugin_slug;
+    $dir_exists  = is_dir($plugin_dir);
+    $dir_files   = $dir_exists ? (scandir($plugin_dir) ?: []) : [];
+    $php_files   = array_filter($dir_files, fn($f) => substr($f, -4) === '.php');
+    $wp_plugin_dir = WP_PLUGIN_DIR;
+
     return new WP_Error('activate_failed',
-      "Plugin downloaded to /wp-content/plugins/{$plugin_slug}/ — please activate manually in WP Admin → Plugins.",
+      "Cannot identify main plugin file. Debug: WP_PLUGIN_DIR={$wp_plugin_dir}, " .
+      "dir_exists=" . ($dir_exists ? 'yes' : 'no') . ", " .
+      "files=[" . implode(',', array_slice($dir_files, 0, 20)) . "], " .
+      "php_files=[" . implode(',', $php_files) . "]",
       ['status' => 500]
     );
   }
