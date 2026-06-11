@@ -1252,12 +1252,13 @@ Return JSON: {
                   }
                 }
                 if (!countBumped) {
-                  // ThemeREX may use the default (3) without writing the field to JSON.
-                  // Explicitly set size = existingPostCount + 1 so the new card shows.
+                  // ThemeREX uses 3 as PHP default without writing the field to JSON.
+                  // DB confirms the field is called "count" (from elementor_controls_usage).
+                  // Explicitly add count = existingPosts + 1 so the new card shows.
                   const newTotal = (targetWidget.existingPosts || []).length + 1;
-                  s.size = String(newTotal);
+                  s.count = String(newTotal);
                   countBumped = true;
-                  console.log(`📈 Set ${el.widgetType}.size explicitly to ${newTotal} (was using default, not stored in JSON)`);
+                  console.log(`📈 Set ${el.widgetType}.count explicitly to ${newTotal} (confirmed field name from DB elementor_controls_usage)`);
                 }
               }
               bumpCount(el.elements);
