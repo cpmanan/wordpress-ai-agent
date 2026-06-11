@@ -1043,90 +1043,98 @@ add_action('rest_api_init', function() {
           timestamp: new Date().toISOString()
         });
 
-        // 5. Parse Elementor data to extract widget text summaries for GPT
-        // We NEVER re-serialize the full JSON — only do raw string replacement on the original
-        const rawJson = typeof elementorData === 'string' ? elementorData : JSON.stringify(elementorData);
-        const parsed = JSON.parse(rawJson);
+        // 5. Parse Elementor data and build an indexed widget map
+        // Strategy: index every widget → GPT picks an index → we update that field in-place
+        // This avoids ALL string-matching problems (truncation, encoding, special chars)
+        const parsed = JSON.parse(typeof elementorData === 'string' ? elementorData : JSON.stringify(elementorData));
 
-        // Flatten widgets to a summary list — GPT uses this to identify target + new value
-        function flattenWidgets(elements) {
-          const widgets = [];
+        // Build indexed widget list — ref array points to the actual parsed node so we can mutate it
+        const widgetRefs = []; // { index, widgetType, field, preview, node }
+        function indexWidgets(elements) {
           for (const el of (elements || [])) {
             if (el.elType === 'widget') {
               const s = el.settings || {};
               for (const field of ['title', 'editor', 'text', 'description', 'caption']) {
                 if (s[field]) {
-                  // Keep raw value including HTML — GPT must return exact text so string replacement works
-                  widgets.push({ widgetType: el.widgetType, field, text: String(s[field]).substring(0, 200) });
+                  const fullText = String(s[field]);
+                  widgetRefs.push({
+                    index:      widgetRefs.length,
+                    widgetType: el.widgetType,
+                    field,
+                    preview:    fullText.replace(/<[^>]+>/g, '').substring(0, 120), // strip HTML for display only
+                    node:       s  // direct reference to settings object — mutate field here
+                  });
                   break;
                 }
               }
             }
-            if (el.elements?.length) widgets.push(...flattenWidgets(el.elements));
+            if (el.elements?.length) indexWidgets(el.elements);
           }
-          return widgets;
         }
+        indexWidgets(parsed);
+        console.log(`📋 Found ${widgetRefs.length} text widgets in Elementor data`);
 
-        const widgetSummary = flattenWidgets(parsed);
-        console.log(`📋 Found ${widgetSummary.length} text widgets in Elementor data`);
+        // Build summary for GPT — plain-text preview only (for identification), plus index
+        const widgetSummary = widgetRefs.map(w => ({ index: w.index, widgetType: w.widgetType, field: w.field, preview: w.preview }));
 
-        // Ask GPT to identify which text to change — returns old_text + new_text only
+        // Ask GPT to identify WHICH widget (by index) to change, and what the new text should be
         const elemResponse = await getOpenAI().chat.completions.create({
           model: 'gpt-4o',
           messages: [
             {
               role: 'system',
-              content: `You are an Elementor editor assistant. Given a list of text widgets and a task, identify the one to change.
+              content: `You are an Elementor editor assistant. Given a list of text widgets (with index numbers) and a task, identify which widget to update.
 
-CRITICAL: The "old_text" field must be COPIED EXACTLY from the "text" value in the widget list — including any HTML tags, special characters, or whitespace. Do not clean, decode, or modify it in any way. This exact string must exist in the raw JSON.
-
-Return JSON: {
+Return JSON:
+{
   "changed": true or false,
-  "widget_type": "the widgetType value",
-  "field": "title|editor|text|description",
-  "old_text": "EXACT copy of the text value from the list — do not modify",
-  "new_text": "the replacement text (plain text, no extra HTML unless requested)",
-  "what_changed": "brief description"
-}`
+  "widget_index": <number — the index from the list>,
+  "new_text": "the full replacement text (plain text unless HTML specifically requested)",
+  "what_changed": "brief description of the change"
+}
+
+Do NOT return old_text. Only return the index and new value.`
             },
             {
               role: 'user',
-              content: `Task: ${title}\n\nDetails: ${description}\n\nPage: "${elemPage.title?.rendered}"\n\nText widgets:\n${JSON.stringify(widgetSummary, null, 2).substring(0, 5000)}`
+              content: `Task: ${title}\n\nDetails: ${description}\n\nPage: "${elemPage.title?.rendered}"\n\nWidgets:\n${JSON.stringify(widgetSummary, null, 2).substring(0, 6000)}`
             }
           ],
           response_format: { type: 'json_object' }
         });
 
         const elemResult = JSON.parse(elemResponse.choices[0].message.content);
+        console.log(`🤖 GPT Elementor result:`, JSON.stringify(elemResult));
 
-        if (!elemResult.changed || !elemResult.old_text) {
+        if (!elemResult.changed || elemResult.widget_index == null) {
           await addComment(issueKey,
             `⚠️ Could not identify which widget to change.\n\n` +
-            `Available text widgets (first 8):\n${widgetSummary.slice(0, 8).map(w => `• [${w.widgetType}] "${w.text}"`).join('\n')}\n\n` +
+            `Available widgets:\n${widgetSummary.slice(0, 8).map(w => `• [${w.index}] [${w.widgetType}] "${w.preview}"`).join('\n')}\n\n` +
             `[Edit in Elementor|${WP_BASE}/wp-admin/post.php?post=${elemPage.id}&action=elementor]`
           );
           await transitionIssue(issueKey, 'In Review');
           break;
         }
 
-        // 6. Raw string replacement on the ORIGINAL JSON — zero re-serialization risk
-        // Escape the old text for use in a regex (handles special chars in JSON strings)
-        // We match the JSON-encoded version of old_text inside the raw JSON string
-        const jsonEncodeText = (s) => JSON.stringify(s).slice(1, -1); // encode without outer quotes
-        const oldEncoded = jsonEncodeText(elemResult.old_text);
-        const newEncoded = jsonEncodeText(elemResult.new_text);
-
-        if (!rawJson.includes(oldEncoded)) {
-          await addComment(issueKey, `⚠️ Could not find the target text in Elementor data. The text may contain special characters. Please edit manually in Elementor.`);
+        const targetWidget = widgetRefs[elemResult.widget_index];
+        if (!targetWidget) {
+          await addComment(issueKey, `⚠️ Widget index ${elemResult.widget_index} not found. Please edit manually in Elementor.`);
           await transitionIssue(issueKey, 'In Review');
           break;
         }
 
-        // Replace only the FIRST occurrence (the target widget)
-        const updatedJson = rawJson.replace(oldEncoded, newEncoded);
-        console.log(`✅ Raw string replacement applied (${oldEncoded.substring(0, 50)} → ${newEncoded.substring(0, 50)})`);
+        const oldValue = targetWidget.node[targetWidget.field];
+        console.log(`✅ Updating widget[${elemResult.widget_index}] ${targetWidget.widgetType}.${targetWidget.field}`);
+        console.log(`   Old: ${String(oldValue).substring(0, 80)}`);
+        console.log(`   New: ${String(elemResult.new_text).substring(0, 80)}`);
 
-        // 7. Write back — only the changed text differs from the original, structure is intact
+        // 6. Mutate the parsed object in-place — only one field changes
+        targetWidget.node[targetWidget.field] = elemResult.new_text;
+
+        // Re-serialize the updated structure
+        const updatedJson = JSON.stringify(parsed);
+
+        // 7. Write back
         await axios.post(`${WP_BASE}/wp-json/brinda-agent/v1/elementor-data`, {
           post_id:        elemPage.id,
           elementor_data: updatedJson,
