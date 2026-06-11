@@ -1261,15 +1261,20 @@ Return JSON: {
           console.log(`📊 Count bump result: ${countBumped ? 'updated ✅' : 'no count field found ❌'}`);
           updatedCountJson = JSON.stringify(parsed);
 
-          // Write updated Elementor JSON (count change) back to the page
-          try {
-            await axios.post(`${WP_BASE}/wp-json/brinda-agent/v1/elementor-data`, {
-              post_id:        elemPage.id,
-              elementor_data: updatedCountJson,
-            }, { headers: agentHdrs });
-            console.log(`✅ Elementor count updated on page ${elemPage.id}`);
-          } catch (writeErr) {
-            console.warn(`⚠️ Could not update count in Elementor JSON: ${writeErr.message}`);
+          // Only write back if we actually changed the count (some ThemeREX widgets
+          // show all posts in a category with no count field — no write needed)
+          if (countBumped) {
+            try {
+              await axios.post(`${WP_BASE}/wp-json/brinda-agent/v1/elementor-data`, {
+                post_id:        elemPage.id,
+                elementor_data: updatedCountJson,
+              }, { headers: agentHdrs });
+              console.log(`✅ Elementor count updated on page ${elemPage.id}`);
+            } catch (writeErr) {
+              console.warn(`⚠️ Could not update count in Elementor JSON: ${writeErr.message}`);
+            }
+          } else {
+            console.log(`ℹ️  No count field in widget — widget shows all CPT posts in category automatically`);
           }
 
           // Save revert meta — stores BOTH the new post ID AND original Elementor JSON
