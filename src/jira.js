@@ -95,4 +95,26 @@ async function transitionIssue(issueKey, statusName) {
   console.log(`✅ Transitioned ${issueKey} → ${statusName}`);
 }
 
-module.exports = { getIssue, addComment, setRevertMeta, getRevertMeta, transitionIssue };
+// Append plain text to issue description (used when agent needs page ID clarification)
+async function appendToDescription(issueKey, extraText) {
+  const issue = await getIssue(issueKey);
+  // Get current description as plain text blocks
+  const currentBlocks = issue.fields.description?.content || [];
+  await axios.put(
+    `${BASE_URL}/rest/api/3/issue/${issueKey}`,
+    {
+      fields: {
+        description: {
+          type: 'doc', version: 1,
+          content: [
+            ...currentBlocks,
+            { type: 'paragraph', content: [{ type: 'text', text: extraText }] }
+          ]
+        }
+      }
+    },
+    { auth }
+  );
+}
+
+module.exports = { getIssue, addComment, setRevertMeta, getRevertMeta, transitionIssue, appendToDescription };

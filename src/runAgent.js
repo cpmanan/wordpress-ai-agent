@@ -1031,10 +1031,32 @@ add_action('rest_api_init', function() {
               .filter(x => x.score > 0)
               .sort((a, b) => b.score - a.score);
 
-            // Try pages in score order — skip any that have no Elementor data
+            // If top 2 scores are close (within 1), agent is uncertain — ask for clarification
+            const CONFIDENCE_THRESHOLD = 2; // minimum score to proceed without asking
+            const topScore = scoredPages[0]?.score || 0;
+            const secondScore = scoredPages[1]?.score || 0;
+            const isAmbiguous = topScore < CONFIDENCE_THRESHOLD || (topScore - secondScore) <= 1;
+
+            if (isAmbiguous && scoredPages.length > 0) {
+              // Ask user which page to edit instead of guessing
+              const options = scoredPages.slice(0, 4).map((x, i) =>
+                `• *${x.page.title}* (ID: ${x.page.id}) — /${x.page.slug}/`
+              ).join('\n');
+              await addComment(issueKey,
+                `🤔 I found multiple possible pages for this task and I'm not confident which one to edit.\n\n` +
+                `*Top matches:*\n${options}\n\n` +
+                `Please reply with one of:\n` +
+                `• \`page: <ID>\` — e.g. \`page: 193\`\n` +
+                `• Paste the Elementor editor URL: \`https://…/post.php?post=193&action=elementor\`\n` +
+                `• Add \`page ID: 193\` to the task description and comment \`run\``
+              );
+              await transitionIssue(issueKey, 'In Review');
+              break;
+            }
+
+            // Confident enough — try pages in score order, skip those with no Elementor data
             for (const { page: kbPage, score } of scoredPages) {
               const candidate = await getPage(kbPage.id);
-              // Quick check: fetch Elementor data length before committing
               let hasData = false;
               try {
                 const chkRes = await axios.get(`${WP_BASE}/wp-json/brinda-agent/v1/elementor-data`, {
@@ -1067,7 +1089,18 @@ add_action('rest_api_init', function() {
         }
 
         if (!elemPage) {
-          await addComment(issueKey, `⚠️ Could not find the Elementor page. Please include the page ID in the task description (e.g. "page ID: 2360").`);
+          await addComment(issueKey,
+            `🤔 I couldn't find a matching Elementor page for this task.\n\n` +
+            `Please add one of these to the task description and comment \`run\`:\n` +
+            `• \`page ID: 193\`\n` +
+            `• The Elementor editor URL: \`https://…/post.php?post=193&action=elementor\`\n\n` +
+            `*All Elementor pages:*\n` +
+            (siteKb?.elementor_pages || [])
+              .filter(p => !/^elementor\s+page\s+#\d+$/i.test(p.title.trim()))
+              .slice(0, 10)
+              .map(p => `• *${p.title}* (ID: ${p.id})`)
+              .join('\n')
+          );
           await transitionIssue(issueKey, 'In Review');
           break;
         }

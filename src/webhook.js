@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const { runAgent, redoTask } = require('./runAgent');
 const { revertTask } = require('./revert');
-const { getIssue, addComment, getRevertMeta, transitionIssue } = require('./jira');
+const { getIssue, addComment, getRevertMeta, transitionIssue, appendToDescription } = require('./jira');
 const { updatePost, updatePage } = require('./wpRest');
 const { buildKnowledge, getKnowledge } = require('./siteKnowledge');
 
@@ -180,6 +180,17 @@ app.post('/webhook/jira', async (req, res) => {
       // ── run — manually re-trigger agent ─────────────────────────
       if (commentText === 'run') {
         console.log(`▶️  Manual run triggered on: ${issueKey}`);
+        await runAgent(issueKey);
+      }
+
+      // ── page: <ID> — answer to agent's page clarification question ──
+      // Agent asks "which page?" → user replies "page: 193"
+      const pageReply = commentText.match(/^page:\s*(\d+)$/);
+      if (pageReply) {
+        const pageId = pageReply[1];
+        console.log(`📄 Page clarification received for ${issueKey}: page ID ${pageId}`);
+        // Append page ID to description so runAgent picks it up via regex
+        await appendToDescription(issueKey, `page ID: ${pageId}`).catch(() => {});
         await runAgent(issueKey);
       }
 
