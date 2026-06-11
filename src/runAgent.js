@@ -2204,8 +2204,77 @@ async function redoTask(issueKey, feedback) {
       ? await getPage(postId)
       : await getPost(postId);
 
-    const currentContent = currentPage.content?.raw || currentPage.content?.rendered || '';
+    let currentContent = currentPage.content?.raw || currentPage.content?.rendered || '';
     const currentTitle = currentPage.title?.raw || currentPage.title?.rendered || '';
+
+    // ── Image replacement: detect broken/missing image feedback ──────────────
+    // If feedback mentions broken images, download real images and replace src attrs
+    const isImageFeedback = /broken|image|photo|picture|missing image|replace image|download image/i.test(feedback);
+    if (isImageFeedback) {
+      console.log(`🖼️  Image feedback detected — scanning for <img> tags to replace`);
+
+      // Extract all img src URLs from current content
+      const imgTagMatches = [...currentContent.matchAll(/<img[^>]+src=["']([^"']+)["'][^>]*>/gi)];
+      console.log(`📷 Found ${imgTagMatches.length} img tags in content`);
+
+      if (imgTagMatches.length > 0) {
+        // Ask GPT what search queries to use for each image based on surrounding context
+        const imgPlan = await getOpenAI().chat.completions.create({
+          model: 'gpt-4o',
+          messages: [
+            { role: 'system', content: `You are planning image replacements for a yoga studio website.
+For each image, suggest an Unsplash/Pexels search query based on the surrounding context.
+Return JSON: { "images": [ { "old_src": "...", "search_query": "yoga ..." }, ... ] }` },
+            { role: 'user', content: `Page title: ${currentTitle}\nFeedback: ${feedback}\n\nHTML with images:\n${currentContent.substring(0, 4000)}` }
+          ],
+          response_format: { type: 'json_object' }
+        });
+        const imgPlanData = JSON.parse(imgPlan.choices[0].message.content);
+        const imagesToReplace = imgPlanData.images || [];
+        console.log(`🔍 GPT planned ${imagesToReplace.length} image replacements`);
+
+        let replacedCount = 0;
+        for (const imgPlan of imagesToReplace) {
+          try {
+            const result = await searchImage(imgPlan.search_query || 'yoga');
+            const safeFilename = (imgPlan.search_query || 'yoga').replace(/[^a-z0-9]/gi, '-').toLowerCase() + '-redo.jpg';
+            const uploaded = await uploadImageToWP(result.url, safeFilename);
+            // Replace the old src with the new uploaded URL
+            currentContent = currentContent.replace(imgPlan.old_src, uploaded.url);
+            console.log(`✅ Replaced image: "${imgPlan.old_src.substring(0, 60)}" → ID ${uploaded.id}`);
+            replacedCount++;
+          } catch (imgErr) {
+            console.warn(`⚠️ Could not replace image "${imgPlan.old_src?.substring(0, 60)}": ${imgErr.message}`);
+          }
+        }
+
+        if (replacedCount > 0) {
+          // Save the updated content with real images
+          if (postType === 'page') {
+            await updatePage(postId, { content: currentContent });
+          } else {
+            await updatePost(postId, { content: currentContent });
+          }
+          await setRevertMeta(issueKey, { ...meta, lastFeedback: feedback, timestamp: new Date().toISOString() });
+          await transitionIssue(issueKey, 'In Review');
+          const previewUrl = postType === 'page'
+            ? `${process.env.WP_STAGING_URL}/?page_id=${postId}&preview=true`
+            : `${process.env.WP_STAGING_URL}/?p=${postId}&preview=true`;
+          await addComment(issueKey,
+            `✅ Replaced ${replacedCount} broken image${replacedCount > 1 ? 's' : ''} with real photos from Unsplash.\n\n` +
+            `New preview: ${previewUrl}\n\n` +
+            `──────────────────────\n` +
+            `💬 Available commands:\n` +
+            `• \`redo: <your feedback>\` — request another fix\n` +
+            `• Drag to *Deployment* column to publish live\n` +
+            `• \`revert\` — undo all changes back to original`
+          );
+          return;
+        }
+      }
+      // If no images found or all failed — fall through to normal GPT redo
+      console.log(`⚠️ No images replaced — falling through to normal redo`);
+    }
 
     // Ask OpenAI to apply the feedback correction
     const aiResponse = await getOpenAI().chat.completions.create({
