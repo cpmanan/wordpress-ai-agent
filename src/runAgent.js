@@ -1557,17 +1557,32 @@ Return JSON: {
                 }
                 // B) Standard Elementor widgets (heading, text-editor, button, image, etc.)
               } else {
-                for (const field of TOP_FIELDS) {
-                  if (s[field]) {
-                    widgetRefs.push({
-                      index:      widgetRefs.length,
-                      widgetType: el.widgetType,
-                      field,
-                      preview:    String(s[field]).replace(/<[^>]+>/g, '').substring(0, 120),
-                      node:       s,
-                      elId:       el.id
-                    });
-                    break;
+                // Special: image-gallery widget — expose wp_gallery array
+                if (el.widgetType === 'image-gallery' || el.widgetType === 'gallery') {
+                  const gallery = s.wp_gallery || s.gallery || [];
+                  widgetRefs.push({
+                    index:      widgetRefs.length,
+                    widgetType: el.widgetType,
+                    field:      'wp_gallery',
+                    preview:    `[Gallery: ${gallery.length} image${gallery.length !== 1 ? 's' : ''}]`,
+                    node:       s,
+                    elId:       el.id,
+                    isGallery:  true,
+                    galleryCount: gallery.length,
+                  });
+                } else {
+                  for (const field of TOP_FIELDS) {
+                    if (s[field]) {
+                      widgetRefs.push({
+                        index:      widgetRefs.length,
+                        widgetType: el.widgetType,
+                        field,
+                        preview:    String(s[field]).replace(/<[^>]+>/g, '').substring(0, 120),
+                        node:       s,
+                        elId:       el.id
+                      });
+                      break;
+                    }
                   }
                 }
               }
@@ -1592,7 +1607,8 @@ Return JSON: {
           .filter(w => w.isItem && !w.isImage)
           .map(w => ({ index: w.index, widgetType: w.widgetType, field: w.field, preview: w.preview }));
 
-        // 6a. CALL 1 — detect action (edit vs add_card) — uses REAL page map
+        // 6a. CALL 1 — detect action (edit vs add_card vs add_gallery_images) — uses REAL page map
+        const galleryWidgets = widgetRefs.filter(w => w.isGallery);
         const actionResponse = await getOpenAI().chat.completions.create({
           model: 'gpt-4o',
           messages: [
@@ -1600,9 +1616,12 @@ Return JSON: {
               role: 'system',
               content: `You are an Elementor task classifier. You have been given the REAL page structure (inspected via SSH).
 Use the page map to understand what data sources exist before deciding the action.
-Return JSON: { "action": "edit" | "add_card", "reason": "one sentence" }
+Return JSON: { "action": "edit" | "add_card" | "add_gallery_images", "reason": "one sentence" }
+Choose "add_gallery_images" when the task mentions adding photos/images to a gallery and the page has a gallery widget.
 Choose "add_card" when task says: add, new card, fourth, insert, create another, duplicate a card.
-Choose "edit" for everything else.\n\n${pageMapContext}`
+Choose "edit" for everything else.
+
+Gallery widgets on this page: ${galleryWidgets.length} (${galleryWidgets.map(w => `[${w.index}] ${w.preview}`).join(', ') || 'none'})\n\n${pageMapContext}`
             },
             { role: 'user', content: `Task: ${title}\n\nDetails: ${description}` }
           ],
@@ -1643,6 +1662,9 @@ Return JSON: { "clone_from_widget_index": <index from the list below>, "new_head
             });
             elemResult = { action: 'add_card', ...JSON.parse(r.choices[0].message.content) };
           }
+        } else if (actionDecision.action === 'add_gallery_images') {
+          // PATH D — gallery; elemResult not needed (handled directly in PATH D below)
+          elemResult = { action: 'add_gallery_images' };
         } else {
           // 6b. CALL 2 (edit) — check if a previous section clarification was given
           // If user replied "section: 3" it was stored in feedbackContext as "section:3"
@@ -1905,14 +1927,122 @@ Write replacement text for the specified widget. Return JSON: { "new_text": "...
             `*Heading:* ${elemResult.new_heading}\n` +
             `*Image:* ${imageAttachment ? `Uploaded (ID: ${imageAttachment.id}) — ${imageAttachment.credit}` : 'Kept from cloned card (no PEXELS_API_KEY set)'}`;
 
+        // ════════════════════════════════════════════════════════════════
+        // PATH D — ADD GALLERY IMAGES
+        // Finds the image-gallery widget, searches Pexels for relevant
+        // yoga photos, uploads them to WP media library, and appends
+        // {id, url} entries to settings.wp_gallery.
+        // ════════════════════════════════════════════════════════════════
+        } else if (elemResult?.action === 'add_gallery_images' || actionDecision.action === 'add_gallery_images') {
+          const galleryRef = galleryWidgets[0]; // use first gallery on the page
+          if (!galleryRef) {
+            await addComment(issueKey,
+              `⚠️ No image-gallery widget found on this page.\n\n` +
+              `[Edit in Elementor|${WP_BASE}/wp-admin/post.php?post=${elemPage.id}&action=elementor]`
+            );
+            await transitionIssue(issueKey, 'In Review');
+            break;
+          }
+
+          const existingGallery = galleryRef.node.wp_gallery || galleryRef.node.gallery || [];
+          console.log(`📸 Gallery widget found — currently ${existingGallery.length} images`);
+
+          // Ask GPT how many images to add and what to search for
+          const galleryPlan = await getOpenAI().chat.completions.create({
+            model: 'gpt-4o',
+            messages: [
+              { role: 'system', content: `You are planning gallery image additions for a yoga studio website.
+Return JSON: { "count": <number of images to add, default 3>, "search_query": "yoga <relevant keyword>", "what_changed": "brief description" }
+Keep count between 1 and 5.` },
+              { role: 'user', content: `Task: ${title}\n\nDetails: ${description}\n\nPage: "${elemPage.title?.rendered}"\nCurrent gallery has ${existingGallery.length} images.` }
+            ],
+            response_format: { type: 'json_object' }
+          });
+          const plan = JSON.parse(galleryPlan.choices[0].message.content);
+          const searchQuery = plan.search_query || 'yoga meditation';
+          const addCount    = Math.min(Math.max(1, plan.count || 3), 5);
+          console.log(`🔍 Searching Pexels for "${searchQuery}" — adding ${addCount} images`);
+
+          // Search Pexels and upload images
+          const newGalleryEntries = [];
+          const pexelsKey = process.env.PEXELS_API_KEY;
+          if (!pexelsKey) {
+            await addComment(issueKey,
+              `⚠️ PEXELS_API_KEY is not set — cannot search for images automatically.\n\n` +
+              `Please add photos manually in Elementor:\n` +
+              `[Edit in Elementor|${WP_BASE}/wp-admin/post.php?post=${elemPage.id}&action=elementor]\n\n` +
+              `Or set PEXELS_API_KEY and comment \`run\` to retry.`
+            );
+            await transitionIssue(issueKey, 'In Review');
+            break;
+          }
+
+          try {
+            const pexelsRes = await axios.get('https://api.pexels.com/v1/search', {
+              headers: { Authorization: pexelsKey },
+              params: { query: searchQuery, per_page: addCount + 2, orientation: 'landscape' }
+            });
+            const photos = pexelsRes.data.photos || [];
+            console.log(`📷 Pexels returned ${photos.length} photos for "${searchQuery}"`);
+
+            // Filter out any already in gallery
+            const existingUrls = new Set(existingGallery.map(g => g.url));
+            const freshPhotos  = photos.filter(p => !existingUrls.has(p.src.large)).slice(0, addCount);
+
+            for (const photo of freshPhotos) {
+              const imgUrl      = photo.src.large || photo.src.medium;
+              const safeFilename = searchQuery.replace(/[^a-z0-9]/gi, '-').toLowerCase() + `-${photo.id}.jpg`;
+              try {
+                const uploaded = await uploadImageToWP(imgUrl, safeFilename);
+                newGalleryEntries.push({ id: uploaded.id, url: uploaded.url });
+                console.log(`✅ Uploaded gallery image: ID ${uploaded.id}`);
+              } catch (uploadErr) {
+                console.warn(`⚠️ Failed to upload photo ${photo.id}: ${uploadErr.message}`);
+              }
+            }
+          } catch (pexelsErr) {
+            console.warn(`⚠️ Pexels search failed: ${pexelsErr.message}`);
+          }
+
+          if (newGalleryEntries.length === 0) {
+            await addComment(issueKey,
+              `⚠️ Could not upload any new gallery images (search: "${searchQuery}").\n\n` +
+              `Please add photos manually:\n[Edit in Elementor|${WP_BASE}/wp-admin/post.php?post=${elemPage.id}&action=elementor]`
+            );
+            await transitionIssue(issueKey, 'In Review');
+            break;
+          }
+
+          // Append new images to the gallery array
+          const updatedGallery = [...existingGallery, ...newGalleryEntries];
+          if (galleryRef.node.wp_gallery !== undefined) {
+            galleryRef.node.wp_gallery = updatedGallery;
+          } else {
+            galleryRef.node.gallery = updatedGallery;
+          }
+
+          updatedJson    = JSON.stringify(parsed);
+          successComment =
+            `✅ Gallery updated on *"${elemPage.title?.rendered}"*\n\n` +
+            `*Added:* ${newGalleryEntries.length} new yoga photos\n` +
+            `*Gallery total:* ${existingGallery.length} → ${updatedGallery.length} images\n` +
+            `*Search query:* "${searchQuery}"\n` +
+            `*Photos:* ${newGalleryEntries.map(e => `[View|${e.url}]`).join(' | ')}`;
+
+          rememberPage(title, elemPage.id, elemPage.title?.rendered, elemPage.slug, issueKey);
+          recordOutcome(issueKey, title, 'elementor', 'success', {
+            pageId: elemPage.id, widgetType: 'image-gallery',
+            note: `Added ${newGalleryEntries.length} images to gallery on "${elemPage.title?.rendered}"`
+          });
+
         } else {
-          await addComment(issueKey, `⚠️ Unknown Elementor action "${elemResult.action}". Please edit manually.`);
+          await addComment(issueKey, `⚠️ Unknown Elementor action "${elemResult?.action || actionDecision.action}". Please edit manually.`);
           await transitionIssue(issueKey, 'In Review');
           break;
         }
 
         // Re-serialize the updated structure
-        // updatedJson already set in path A or B above
+        // updatedJson already set in path A, B or D above
 
         // 7. Write back
         await axios.post(`${WP_BASE}/wp-json/brinda-agent/v1/elementor-data`, {

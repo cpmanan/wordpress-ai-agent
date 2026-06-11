@@ -64,6 +64,8 @@ const BACKUP_KEYWORDS = [
 const ELEMENTOR_KEYWORDS = [
   'elementor', 'page builder', 'contact form section', 'testimonial section',
   'gallery section', 'slider section', 'add section', 'add widget',
+  'gallery', 'photo gallery', 'add photo', 'add photos', 'add image', 'add images',
+  'add more photo', 'add more image', 'add picture', 'add pictures',
   'add block', 'page layout', 'build page',
   // Page content edits — these pages are Elementor-built on this site
   'about us page', 'about page', 'buy classes', 'classes page',
