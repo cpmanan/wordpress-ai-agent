@@ -1005,8 +1005,18 @@ add_action('rest_api_init', function() {
           console.warn(`⚠️ WP Engine API not configured — skipping backup checkpoint for ${issueKey}`);
         }
 
+        // Use brinda-agent REST endpoints — no WP-CLI/SSH on Railway
+        const agentPluginBase = `${process.env.WP_STAGING_URL}/wp-json/brinda-agent/v1`;
+        const agentPluginHdrs = { 'X-Agent-Token': process.env.AGENT_TOKEN || '' };
+
         if (pluginPlan.action === 'install') {
-          await installPlugin(pluginPlan.pluginSlug);
+          const instRes = await axios.post(
+            `${agentPluginBase}/install-plugin`,
+            { plugin_slug: pluginPlan.pluginSlug },
+            { headers: agentPluginHdrs, timeout: 120000 }
+          );
+          const instData = instRes.data;
+
           if (!pluginBackupId) {
             await setRevertMeta(issueKey, {
               type: 'plugin',
@@ -1015,17 +1025,27 @@ add_action('rest_api_init', function() {
               timestamp: new Date().toISOString()
             });
           }
-          await transitionIssue(issueKey, 'Done');
+          await transitionIssue(issueKey, 'In Review');
           await addComment(issueKey,
-            `✅ Plugin installed and activated: "${pluginPlan.pluginName}"\n\n` +
+            `✅ *${instData.message}*\n\n` +
+            (pluginBackupId ? `• *Backup ID:* \`${pluginBackupId}\`\n` : '') +
+            `• [Verify in WP Admin|${process.env.WP_STAGING_URL}/wp-admin/plugins.php]\n\n` +
             `• \`revert\` — deactivate and remove this plugin`
           );
         }
 
         if (pluginPlan.action === 'deactivate') {
-          await deactivatePlugin(pluginPlan.pluginSlug);
-          await transitionIssue(issueKey, 'Done');
-          await addComment(issueKey, `✅ Plugin deactivated: "${pluginPlan.pluginName}"`);
+          const deactRes = await axios.post(
+            `${agentPluginBase}/deactivate-plugin`,
+            { plugin_slug: pluginPlan.pluginSlug, delete: false },
+            { headers: agentPluginHdrs, timeout: 30000 }
+          );
+          await transitionIssue(issueKey, 'In Review');
+          await addComment(issueKey,
+            `✅ *${deactRes.data.message}*\n\n` +
+            (pluginBackupId ? `• *Backup ID:* \`${pluginBackupId}\`\n` : '') +
+            `• \`revert\` — re-activate this plugin`
+          );
         }
         break;
       }

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Brinda Agent API
  * Description: REST API endpoints for the WordPress AI Agent (Railway → WP Engine over HTTPS)
- * Version: 2.2
+ * Version: 2.3
  * Author: Brinda AI Agent
  */
 
@@ -152,6 +152,28 @@ add_action('rest_api_init', function () {
   register_rest_route('brinda-agent/v1', '/update-plugin', [
     'methods'             => 'POST',
     'callback'            => 'brinda_update_plugin',
+    'permission_callback' => 'brinda_auth',
+  ]);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // POST /wp-json/brinda-agent/v1/install-plugin
+  // Installs and activates a plugin from WordPress.org by slug.
+  // Body: { "plugin_slug": "complianz-gdpr" }
+  // ══════════════════════════════════════════════════════════════════════════
+  register_rest_route('brinda-agent/v1', '/install-plugin', [
+    'methods'             => 'POST',
+    'callback'            => 'brinda_install_plugin',
+    'permission_callback' => 'brinda_auth',
+  ]);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // POST /wp-json/brinda-agent/v1/deactivate-plugin
+  // Deactivates (and optionally deletes) a plugin by slug.
+  // Body: { "plugin_slug": "complianz-gdpr", "delete": false }
+  // ══════════════════════════════════════════════════════════════════════════
+  register_rest_route('brinda-agent/v1', '/deactivate-plugin', [
+    'methods'             => 'POST',
+    'callback'            => 'brinda_deactivate_plugin',
     'permission_callback' => 'brinda_auth',
   ]);
 
@@ -784,5 +806,151 @@ function brinda_update_plugin(WP_REST_Request $request) {
     'new_version'  => $new_version,
     'updated'      => true,
     'message'      => "Updated {$plugin_data['Name']} from {$old_version} to {$new_version}",
+  ]);
+}
+
+// ── /install-plugin ─────────────────────────────────────────────────────────
+function brinda_install_plugin(WP_REST_Request $request) {
+  $plugin_slug = sanitize_text_field($request->get_param('plugin_slug'));
+  if (!$plugin_slug) {
+    return new WP_Error('missing_param', 'plugin_slug is required', ['status' => 400]);
+  }
+
+  // Load required WP upgrader classes
+  require_once ABSPATH . 'wp-admin/includes/class-wp-upgrader.php';
+  require_once ABSPATH . 'wp-admin/includes/class-automatic-upgrader-skin.php';
+  require_once ABSPATH . 'wp-admin/includes/plugin.php';
+  require_once ABSPATH . 'wp-admin/includes/plugin-install.php';
+
+  // Check if already installed
+  $all_plugins = get_plugins();
+  foreach ($all_plugins as $file => $data) {
+    if (explode('/', $file)[0] === $plugin_slug) {
+      // Already installed — just activate if not active
+      $active_plugins = get_option('active_plugins', []);
+      if (!in_array($file, $active_plugins)) {
+        $result = activate_plugin($file);
+        if (is_wp_error($result)) {
+          return new WP_Error('activate_failed', $result->get_error_message(), ['status' => 500]);
+        }
+        return rest_ensure_response([
+          'success' => true,
+          'plugin'  => $data['Name'],
+          'version' => $data['Version'],
+          'action'  => 'activated',
+          'message' => "Plugin was already installed — activated: {$data['Name']} v{$data['Version']}",
+        ]);
+      }
+      return rest_ensure_response([
+        'success' => true,
+        'plugin'  => $data['Name'],
+        'version' => $data['Version'],
+        'action'  => 'already_active',
+        'message' => "Plugin already installed and active: {$data['Name']} v{$data['Version']}",
+      ]);
+    }
+  }
+
+  // Fetch plugin info from WordPress.org API
+  $api = plugins_api('plugin_information', [
+    'slug'   => $plugin_slug,
+    'fields' => ['short_description' => false, 'sections' => false, 'reviews' => false],
+  ]);
+  if (is_wp_error($api)) {
+    return new WP_Error('plugin_not_found',
+      "Plugin not found on WordPress.org: {$plugin_slug}. Error: " . $api->get_error_message(),
+      ['status' => 404]
+    );
+  }
+
+  // Install the plugin
+  $skin     = new Automatic_Upgrader_Skin();
+  $upgrader = new Plugin_Upgrader($skin);
+  $result   = $upgrader->install($api->download_link);
+
+  if (is_wp_error($result)) {
+    return new WP_Error('install_failed', $result->get_error_message(), ['status' => 500]);
+  }
+  if ($result === false) {
+    return new WP_Error('install_failed', 'Install returned false — check filesystem permissions', ['status' => 500]);
+  }
+
+  // Find and activate the installed plugin
+  $all_plugins = get_plugins(); // refresh after install
+  $plugin_file = null;
+  foreach ($all_plugins as $file => $data) {
+    if (explode('/', $file)[0] === $plugin_slug) {
+      $plugin_file = $file;
+      break;
+    }
+  }
+
+  if (!$plugin_file) {
+    return new WP_Error('activate_failed', 'Plugin installed but could not find plugin file to activate', ['status' => 500]);
+  }
+
+  $activate = activate_plugin($plugin_file);
+  if (is_wp_error($activate)) {
+    return new WP_Error('activate_failed', $activate->get_error_message(), ['status' => 500]);
+  }
+
+  $plugin_data = get_plugins()[$plugin_file];
+  return rest_ensure_response([
+    'success' => true,
+    'plugin'  => $api->name,
+    'version' => $api->version,
+    'file'    => $plugin_file,
+    'action'  => 'installed_and_activated',
+    'message' => "Installed and activated: {$api->name} v{$api->version}",
+  ]);
+}
+
+// ── /deactivate-plugin ───────────────────────────────────────────────────────
+function brinda_deactivate_plugin(WP_REST_Request $request) {
+  $plugin_slug   = sanitize_text_field($request->get_param('plugin_slug'));
+  $should_delete = (bool) $request->get_param('delete');
+
+  if (!$plugin_slug) {
+    return new WP_Error('missing_param', 'plugin_slug is required', ['status' => 400]);
+  }
+
+  require_once ABSPATH . 'wp-admin/includes/plugin.php';
+
+  $all_plugins = get_plugins();
+  $plugin_file = null;
+  $plugin_name = $plugin_slug;
+  foreach ($all_plugins as $file => $data) {
+    if (explode('/', $file)[0] === $plugin_slug) {
+      $plugin_file = $file;
+      $plugin_name = $data['Name'];
+      break;
+    }
+  }
+
+  if (!$plugin_file) {
+    return new WP_Error('not_found', "Plugin not found: {$plugin_slug}", ['status' => 404]);
+  }
+
+  deactivate_plugins($plugin_file);
+
+  if ($should_delete) {
+    require_once ABSPATH . 'wp-admin/includes/file.php';
+    $deleted = delete_plugins([$plugin_file]);
+    if (is_wp_error($deleted)) {
+      return new WP_Error('delete_failed', $deleted->get_error_message(), ['status' => 500]);
+    }
+    return rest_ensure_response([
+      'success' => true,
+      'plugin'  => $plugin_name,
+      'action'  => 'deactivated_and_deleted',
+      'message' => "Deactivated and deleted: {$plugin_name}",
+    ]);
+  }
+
+  return rest_ensure_response([
+    'success' => true,
+    'plugin'  => $plugin_name,
+    'action'  => 'deactivated',
+    'message' => "Deactivated: {$plugin_name}",
   ]);
 }
