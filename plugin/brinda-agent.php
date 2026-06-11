@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Brinda Agent API
  * Description: REST API endpoints for the WordPress AI Agent (Railway → WP Engine over HTTPS)
- * Version: 2.4
+ * Version: 2.5
  * Author: Brinda AI Agent
  */
 
@@ -896,7 +896,38 @@ function brinda_install_plugin(WP_REST_Request $request) {
   }
 
   if (!$plugin_file) {
-    return new WP_Error('activate_failed', 'Plugin installed but could not find plugin file to activate', ['status' => 500]);
+    // Cache may be stale after install — force a full refresh and try again
+    wp_clean_plugins_cache(true);
+    $all_plugins = get_plugins(); // re-fetch with cleared cache
+    foreach ($all_plugins as $file => $data) {
+      $folder = explode('/', $file)[0];
+      // Match by slug directly, OR by slug with common suffix variations
+      if ($folder === $plugin_slug || strpos($folder, $plugin_slug) === 0) {
+        $plugin_file = $file;
+        break;
+      }
+    }
+  }
+
+  if (!$plugin_file) {
+    // Last resort: scan the plugins directory directly
+    $plugin_dir = WP_PLUGIN_DIR . '/' . $plugin_slug;
+    if (is_dir($plugin_dir)) {
+      foreach (glob($plugin_dir . '/*.php') as $php_file) {
+        $header = get_file_data($php_file, ['Plugin Name' => 'Plugin Name']);
+        if (!empty($header['Plugin Name'])) {
+          $plugin_file = $plugin_slug . '/' . basename($php_file);
+          break;
+        }
+      }
+    }
+  }
+
+  if (!$plugin_file) {
+    return new WP_Error('activate_failed',
+      "Plugin files were downloaded to /wp-content/plugins/{$plugin_slug}/ but main plugin file could not be identified. Please activate manually in WP Admin → Plugins.",
+      ['status' => 500]
+    );
   }
 
   $activate = activate_plugin($plugin_file);
