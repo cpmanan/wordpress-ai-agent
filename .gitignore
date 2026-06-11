@@ -3,3 +3,4 @@ node_modules/
 *.pem
 *.key
 /tmp/
+.DS_Store
