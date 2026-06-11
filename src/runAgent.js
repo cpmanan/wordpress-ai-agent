@@ -989,17 +989,36 @@ add_action('rest_api_init', function() {
           // Try slug/title search using knowledge base first (avoids REST round-trips)
           const taskText = (title + ' ' + description).toLowerCase();
           if (siteKb?.elementor_pages?.length) {
-            // Score each Elementor page by how many words from the task match its title
+            // Score each Elementor page by how many task words match its title
+            // Skip auto-generated Elementor library titles like "Elementor Page #7402"
             const taskWords = taskText.split(/\W+/).filter(w => w.length > 2);
-            let bestScore = 0, bestKbPage = null;
-            for (const p of siteKb.elementor_pages) {
-              const pageTitle = p.title.toLowerCase();
-              const score = taskWords.filter(w => pageTitle.includes(w)).length;
-              if (score > bestScore) { bestScore = score; bestKbPage = p; }
-            }
-            if (bestKbPage && bestScore > 0) {
-              elemPage = await getPage(bestKbPage.id);
-              console.log(`✅ Matched Elementor page from KB: "${bestKbPage.title}" (ID: ${bestKbPage.id}, score: ${bestScore})`);
+            const scoredPages = siteKb.elementor_pages
+              .filter(p => !/^elementor\s+page\s+#\d+$/i.test(p.title.trim()))
+              .map(p => ({
+                page:  p,
+                score: taskWords.filter(w => p.title.toLowerCase().includes(w)).length,
+              }))
+              .filter(x => x.score > 0)
+              .sort((a, b) => b.score - a.score);
+
+            // Try pages in score order — skip any that have no Elementor data
+            for (const { page: kbPage, score } of scoredPages) {
+              const candidate = await getPage(kbPage.id);
+              // Quick check: fetch Elementor data length before committing
+              let hasData = false;
+              try {
+                const chkRes = await axios.get(`${WP_BASE}/wp-json/brinda-agent/v1/elementor-data`, {
+                  headers: agentHdrs, params: { post_id: kbPage.id }
+                });
+                hasData = !!(chkRes.data?.elementor_data);
+              } catch {}
+              if (hasData) {
+                elemPage = candidate;
+                console.log(`✅ Matched Elementor page from KB: "${kbPage.title}" (ID: ${kbPage.id}, score: ${score})`);
+                break;
+              } else {
+                console.log(`⏭️  Skipping "${kbPage.title}" (ID: ${kbPage.id}) — no Elementor data, trying next match`);
+              }
             }
           }
 
@@ -1107,9 +1126,19 @@ add_action('rest_api_init', function() {
         }
 
         if (!elementorData || elementorData === '') {
+          // Try to find any other Elementor page in the KB that matches the task
+          const taskWords2 = (title + ' ' + description).toLowerCase().split(/\W+/).filter(w => w.length > 2);
+          const fallbackPage = (siteKb?.elementor_pages || [])
+            .filter(p => p.id !== elemPage.id && !/^elementor\s+page\s+#\d+$/i.test(p.title.trim()))
+            .map(p => ({ page: p, score: taskWords2.filter(w => p.title.toLowerCase().includes(w)).length }))
+            .filter(x => x.score > 0)
+            .sort((a, b) => b.score - a.score)[0];
+
           await addComment(issueKey,
             `⚠️ Page "${elemPage.title?.rendered}" (ID: ${elemPage.id}) has no Elementor data.\n\n` +
-            `This page may not be built with Elementor, or the editor hasn't been opened yet.`
+            `${fallbackPage
+              ? `Closest alternative: *"${fallbackPage.page.title}"* (ID: ${fallbackPage.page.id})\nComment \`run\` to retry, or add "page ID: ${fallbackPage.page.id}" to the task description.`
+              : `No matching Elementor page found. Please add "page ID: X" to the task description.`}`
           );
           await transitionIssue(issueKey, 'In Review');
           break;
