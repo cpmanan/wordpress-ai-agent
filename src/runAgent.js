@@ -26,7 +26,7 @@ function withKb(systemContent, kbCtx) {
   return `${kbCtx}\n\n---\n\n${systemContent}`;
 }
 
-async function runAgent(issueKey, feedbackContext = null) {
+async function runAgent(issueKey, feedbackContext = null, forcedTaskType = null) {
   console.log(`\n🤖 Processing Jira issue: ${issueKey}`);
 
   // 1. Fetch issue details
@@ -42,9 +42,9 @@ async function runAgent(issueKey, feedbackContext = null) {
   await transitionIssue(issueKey, 'In Progress');
   await addComment(issueKey, `🤖 Agent started working on: "${title}"`);
 
-  // 3. Detect task type
-  const taskType = detectTaskType(title, description);
-  console.log(`🔍 Detected task type: ${taskType}`);
+  // 3. Detect task type (can be overridden when re-routing e.g. content → elementor)
+  const taskType = forcedTaskType || detectTaskType(title, description);
+  console.log(`🔍 Detected task type: ${taskType}${forcedTaskType ? ' (forced)' : ''}`);
 
   // 3b. Load site knowledge base — build it if missing or stale (>24h)
   let siteKb = getKnowledge();
@@ -327,14 +327,10 @@ Return JSON exactly like this:
             || currentContent.trim() === '';
 
           if (isElementor) {
-            await addComment(issueKey,
-              `⚠️ This page uses Elementor page builder.\n\n` +
-              `Direct content editing is not supported yet (coming in Phase 3).\n` +
-              `Please make this change manually in WP Admin → Elementor editor.\n\n` +
-              `Page: ${process.env.WP_STAGING_URL}/wp-admin/post.php?post=${postId}&action=elementor`
-            );
-            await transitionIssue(issueKey, 'To Do');
-            break;
+            // Page is Elementor-built — re-run through ELEMENTOR path automatically
+            console.log(`🔄 Page ${postId} uses Elementor — re-routing to ELEMENTOR handler`);
+            await runAgent(issueKey, 'elementor');
+            return;
           }
 
           // Detect full-replace intent: "replace", "rewrite", or page ID explicitly specified in description
