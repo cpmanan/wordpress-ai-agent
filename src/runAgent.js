@@ -977,13 +977,43 @@ add_action('rest_api_init', function() {
         if (elemIdMatch) {
           elemPage = await getPage(parseInt(elemIdMatch[1]));
         } else {
-          // Try slug/title search
-          const slugMatch = (title + ' ' + description).toLowerCase()
-            .match(/\b(contact|about|services|classes|home|faq|gallery|team|booking|schedule)\b/);
-          if (slugMatch) elemPage = await getPageBySlug(slugMatch[0]);
+          // Helper: pick the best match from a list, preferring Elementor pages
+          const elemPageIds = new Set((siteKb?.elementor_pages || []).map(p => p.id));
+          function bestMatch(pages) {
+            if (!pages?.length) return null;
+            // Prefer Elementor pages; within that prefer exact title match
+            const elems = pages.filter(p => elemPageIds.has(p.id || p.ID));
+            return (elems[0] || pages[0]);
+          }
+
+          // Try slug/title search using knowledge base first (avoids REST round-trips)
+          const taskText = (title + ' ' + description).toLowerCase();
+          if (siteKb?.elementor_pages?.length) {
+            // Score each Elementor page by how many words from the task match its title
+            const taskWords = taskText.split(/\W+/).filter(w => w.length > 2);
+            let bestScore = 0, bestKbPage = null;
+            for (const p of siteKb.elementor_pages) {
+              const pageTitle = p.title.toLowerCase();
+              const score = taskWords.filter(w => pageTitle.includes(w)).length;
+              if (score > bestScore) { bestScore = score; bestKbPage = p; }
+            }
+            if (bestKbPage && bestScore > 0) {
+              elemPage = await getPage(bestKbPage.id);
+              console.log(`✅ Matched Elementor page from KB: "${bestKbPage.title}" (ID: ${bestKbPage.id}, score: ${bestScore})`);
+            }
+          }
+
+          // Fall back to REST search if KB match failed
+          if (!elemPage) {
+            const slugMatch = taskText.match(/\b(contact|about|services|classes|home|faq|gallery|team|booking|schedule|programs|buy)\b/);
+            if (slugMatch) {
+              const bySlug = await getPageBySlug(slugMatch[0]);
+              elemPage = bySlug && elemPageIds.has(bySlug.id) ? bySlug : null;
+            }
+          }
           if (!elemPage) {
             const results = await findPageByTitle(title.replace(/phase \d+\s*test \d+\s*:?\s*/i, '').trim());
-            elemPage = results[0] || null;
+            elemPage = bestMatch(results) || null;
           }
         }
 
