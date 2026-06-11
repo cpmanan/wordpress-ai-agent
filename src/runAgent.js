@@ -1051,7 +1051,19 @@ add_action('rest_api_init', function() {
           cleanup(elCloneDir);
         }
 
-        // 3. Read current Elementor data via the custom endpoint
+        // 3. SSH INSPECT FIRST — understand what's on the page before touching anything
+        //    This is how the agent self-diagnoses: reads raw data, maps every widget,
+        //    identifies data sources (Elementor JSON vs CPT vs shortcode), then chooses
+        //    the correct approach. No more guessing.
+        const { inspectPage, formatPageMapForGpt } = require('./pageInspector');
+        const pageMap = await inspectPage(elemPage.id);
+        const pageMapContext = formatPageMapForGpt(pageMap);
+        console.log(`🔬 Page map:\n${pageMapContext}`);
+
+        // Combined context: site KB + live SSH page map (used in ALL Elementor GPT calls)
+        const fullContext = `${kbContext}\n\n${pageMapContext}`;
+
+        // 4. Read current Elementor data via REST (for widget indexing + revert backup)
         let elementorData = null;
         try {
           const getRes = await axios.get(`${WP_BASE}/wp-json/brinda-agent/v1/elementor-data`, {
@@ -1072,7 +1084,7 @@ add_action('rest_api_init', function() {
           break;
         }
 
-        // 4. Save original data for revert
+        // 5. Save original data for revert
         await setRevertMeta(issueKey, {
           type: 'elementor',
           pageId: elemPage.id,
@@ -1080,18 +1092,19 @@ add_action('rest_api_init', function() {
           timestamp: new Date().toISOString()
         });
 
-        // 5. Parse Elementor data — detect CPT-backed shortcodes before widget indexing
+        // 6. Parse Elementor data — CPT-backed shortcode detection now uses pageMap
         const parsed = JSON.parse(typeof elementorData === 'string' ? elementorData : JSON.stringify(elementorData));
 
-        // ── Detect trx_sc_services / trx_sc_courses / similar CPT shortcodes ──
-        // These widgets render from WordPress Custom Post Types (not from widget text).
-        // Adding a card = create a new CPT post in the same category, NOT edit Elementor JSON.
-        const cptWidgets = [];
+        // ── Detect CPT-backed shortcodes via pageMap (inspector already did the SSH work)
         const CPT_SHORTCODE_TYPES = ['trx_sc_services', 'trx_sc_courses', 'trx_sc_team', 'trx_sc_portfolio'];
+        const cptWidgets = pageMap.widgets.filter(w => w.dataSource === 'cpt');
+
+        // Legacy findCptWidgets kept for fallback (in case inspector couldn't SSH)
         function findCptWidgets(els) {
           for (const el of (els || [])) {
             if (el.elType === 'widget' && CPT_SHORTCODE_TYPES.includes(el.widgetType)) {
-              cptWidgets.push({ widgetType: el.widgetType, settings: el.settings || {} });
+              if (!cptWidgets.find(c => c.widgetType === el.widgetType))
+                cptWidgets.push({ widgetType: el.widgetType, settings: el.settings || {} });
             }
             findCptWidgets(el.elements);
           }
@@ -1126,7 +1139,7 @@ Return JSON: {
   "excerpt": "short description shown on the card (1-2 sentences, plain text)",
   "content": "full HTML body for the detail page",
   "image_search_query": "keywords to find a relevant photo"
-}`, kbContext) },
+}`, fullContext) },
               { role: 'user', content: `Task: ${title}\n\nDetails: ${description}` }
             ],
             response_format: { type: 'json_object' }
@@ -1399,16 +1412,17 @@ Return JSON: {
           .filter(w => w.isItem && !w.isImage)
           .map(w => ({ index: w.index, widgetType: w.widgetType, field: w.field, preview: w.preview }));
 
-        // 6a. CALL 1 — detect action (edit vs add_card)
+        // 6a. CALL 1 — detect action (edit vs add_card) — uses REAL page map
         const actionResponse = await getOpenAI().chat.completions.create({
           model: 'gpt-4o',
           messages: [
             {
               role: 'system',
-              content: `You are an Elementor task classifier. Decide whether the task requires EDITING an existing widget or ADDING a new card.
+              content: `You are an Elementor task classifier. You have been given the REAL page structure (inspected via SSH).
+Use the page map to understand what data sources exist before deciding the action.
 Return JSON: { "action": "edit" | "add_card", "reason": "one sentence" }
 Choose "add_card" when task says: add, new card, fourth, insert, create another, duplicate a card.
-Choose "edit" for everything else.`
+Choose "edit" for everything else.\n\n${pageMapContext}`
             },
             { role: 'user', content: `Task: ${title}\n\nDetails: ${description}` }
           ],
@@ -1428,7 +1442,7 @@ Choose "edit" for everything else.`
               messages: [
                 { role: 'system', content: withKb(`You are adding a new card to an Elementor page.
 Pick a widget index from an EXISTING card to clone (heading widget inside a card column).
-Return JSON: { "clone_from_widget_index": <number>, "new_heading": "...", "new_description": "...", "new_button_text": "...", "image_search_query": "...", "what_changed": "..." }`, kbContext) },
+Return JSON: { "clone_from_widget_index": <number>, "new_heading": "...", "new_description": "...", "new_button_text": "...", "image_search_query": "...", "what_changed": "..." }`, fullContext) },
                 { role: 'user', content: `Task: ${title}\n\nDetails: ${description}\n\nPage: "${elemPage.title?.rendered}"\n\nWidgets:\n${JSON.stringify(widgetSummary, null, 2).substring(0, 6000)}` }
               ],
               response_format: { type: 'json_object' }
@@ -1442,7 +1456,7 @@ Return JSON: { "clone_from_widget_index": <number>, "new_heading": "...", "new_d
                 { role: 'system', content: withKb(`You are adding a new card to an Elementor page.
 The list below shows ONLY the existing card items (sub-cards inside a widget group).
 Pick which one to clone — choose the one from the same group as where the new card belongs.
-Return JSON: { "clone_from_widget_index": <index from the list below>, "new_heading": "...", "new_description": "...", "new_button_text": "...", "image_search_query": "...", "what_changed": "..." }`, kbContext) },
+Return JSON: { "clone_from_widget_index": <index from the list below>, "new_heading": "...", "new_description": "...", "new_button_text": "...", "image_search_query": "...", "what_changed": "..." }`, fullContext) },
                 { role: 'user', content: `Task: ${title}\n\nDetails: ${description}\n\nPage: "${elemPage.title?.rendered}"\n\nCard items to clone from:\n${JSON.stringify(cardItemSummary, null, 2)}` }
               ],
               response_format: { type: 'json_object' }
@@ -1455,7 +1469,7 @@ Return JSON: { "clone_from_widget_index": <index from the list below>, "new_head
             model: 'gpt-4o',
             messages: [
               { role: 'system', content: withKb(`You are an Elementor widget editor.
-Return JSON: { "widget_index": <number from the list>, "new_text": "replacement text", "what_changed": "brief description" }`, kbContext) },
+Return JSON: { "widget_index": <number from the list>, "new_text": "replacement text", "what_changed": "brief description" }`, fullContext) },
               { role: 'user', content: `Task: ${title}\n\nDetails: ${description}\n\nPage: "${elemPage.title?.rendered}"\n\nWidgets:\n${JSON.stringify(widgetSummary, null, 2).substring(0, 8000)}` }
             ],
             response_format: { type: 'json_object' }
