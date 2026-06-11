@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Brinda Agent API
  * Description: REST API endpoints for the WordPress AI Agent (Railway → WP Engine over HTTPS)
- * Version: 2.5
+ * Version: 2.6
  * Author: Brinda AI Agent
  */
 
@@ -896,12 +896,19 @@ function brinda_install_plugin(WP_REST_Request $request) {
   }
 
   if (!$plugin_file) {
-    // Cache may be stale after install — force a full refresh and try again
+    // Tier 1: use get_plugins() with subfolder — WordPress's own detection method
     wp_clean_plugins_cache(true);
-    $all_plugins = get_plugins(); // re-fetch with cleared cache
+    $subfolder_plugins = get_plugins('/' . $plugin_slug);
+    if (!empty($subfolder_plugins)) {
+      $plugin_file = array_key_first($subfolder_plugins);
+    }
+  }
+
+  if (!$plugin_file) {
+    // Tier 2: clear cache, re-fetch all plugins, match by folder prefix
+    $all_plugins = get_plugins();
     foreach ($all_plugins as $file => $data) {
       $folder = explode('/', $file)[0];
-      // Match by slug directly, OR by slug with common suffix variations
       if ($folder === $plugin_slug || strpos($folder, $plugin_slug) === 0) {
         $plugin_file = $file;
         break;
@@ -910,12 +917,13 @@ function brinda_install_plugin(WP_REST_Request $request) {
   }
 
   if (!$plugin_file) {
-    // Last resort: scan the plugins directory directly
+    // Tier 3: direct filesystem scan for PHP file with Plugin Name header
     $plugin_dir = WP_PLUGIN_DIR . '/' . $plugin_slug;
     if (is_dir($plugin_dir)) {
-      foreach (glob($plugin_dir . '/*.php') as $php_file) {
-        $header = get_file_data($php_file, ['Plugin Name' => 'Plugin Name']);
-        if (!empty($header['Plugin Name'])) {
+      $php_files = glob($plugin_dir . '/*.php') ?: [];
+      foreach ($php_files as $php_file) {
+        $headers = get_file_data($php_file, ['Plugin Name' => 'Plugin Name'], 'plugin');
+        if (!empty($headers['Plugin Name'])) {
           $plugin_file = $plugin_slug . '/' . basename($php_file);
           break;
         }
@@ -925,7 +933,7 @@ function brinda_install_plugin(WP_REST_Request $request) {
 
   if (!$plugin_file) {
     return new WP_Error('activate_failed',
-      "Plugin files were downloaded to /wp-content/plugins/{$plugin_slug}/ but main plugin file could not be identified. Please activate manually in WP Admin → Plugins.",
+      "Plugin downloaded to /wp-content/plugins/{$plugin_slug}/ — please activate manually in WP Admin → Plugins.",
       ['status' => 500]
     );
   }
