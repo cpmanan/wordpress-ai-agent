@@ -1143,20 +1143,22 @@ add_action('rest_api_init', function() {
         findCptWidgets(parsed);
 
         // Check if this is an add_card task that targets a CPT-backed section
+        // CPT_MAP defines which widget types support add-card (trx_sc_price is NOT add-card)
+        const CPT_MAP = {
+          trx_sc_services:  'cpt_services',
+          trx_sc_courses:   'cpt_courses',
+          trx_sc_team:      'cpt_team',
+          trx_sc_portfolio: 'cpt_portfolio',
+        };
         const isAddCardTask = /\b(add|new card|fourth|insert|create another|duplicate)\b/i.test(title + ' ' + description);
-        if (isAddCardTask && cptWidgets.length > 0) {
+        // Only enter PATH C if: task says add-card AND the CPT widget is in CPT_MAP AND has a category
+        const addCardWidget = cptWidgets.find(w => CPT_MAP[w.widgetType] && (w.settings?.cat || w.settings?.category));
+        if (isAddCardTask && addCardWidget) {
           // ── PATH C: CPT-based add_card ────────────────────────────────────────
           // The trx_sc_services widget pulls posts from a WP category — create a new post there
-          const targetWidget = cptWidgets[0];
+          const targetWidget = addCardWidget;
           const catId = targetWidget.settings.cat || targetWidget.settings.category || '';
-          // Map widget type to CPT post_type slug
-          const CPT_MAP = {
-            trx_sc_services:  'cpt_services',
-            trx_sc_courses:   'cpt_courses',
-            trx_sc_team:      'cpt_team',
-            trx_sc_portfolio: 'cpt_portfolio',
-          };
-          const cptType = CPT_MAP[targetWidget.widgetType] || 'cpt_services';
+          const cptType = CPT_MAP[targetWidget.widgetType];
 
           console.log(`📋 CPT-backed section detected: widget=${targetWidget.widgetType}, cpt=${cptType}, cat=${catId}`);
 
