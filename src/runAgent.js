@@ -2462,6 +2462,9 @@ Return JSON: {
         const wcData = JSON.parse(wcPlan.choices[0].message.content);
         console.log(`🛒 WooCommerce plan:`, JSON.stringify(wcData));
 
+        const WP_BASE = process.env.WP_STAGING_URL;
+        const wpAuth  = { username: process.env.WP_USERNAME, password: process.env.WP_APP_PASSWORD };
+
         // Find the product via WooCommerce REST API (wc/v3/products supports App Password auth)
         let productId   = wcData.product_id;
         let savedProduct = null;
