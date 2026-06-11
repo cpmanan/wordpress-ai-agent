@@ -52,11 +52,16 @@ async function createBackup(description = 'Agent backup', notifyEmails = []) {
   const auth      = getAuth();
   const installId = getInstallId();
 
+  // WP Engine API requires at least one notification email
+  const emails = notifyEmails.length
+    ? notifyEmails
+    : [process.env.ATLASSIAN_EMAIL || 'manan@commercepundit.com'];
+
   console.log(`🔒 Creating WP Engine backup: "${description}" for install ${installId}...`);
 
   const res = await axios.post(
     `${WPE_API_BASE}/installs/${installId}/backups`,
-    { description, notification_emails: notifyEmails },
+    { description, notification_emails: emails },
     {
       auth,
       headers: { 'Content-Type': 'application/json' },
