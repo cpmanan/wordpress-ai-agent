@@ -21,11 +21,9 @@ const axios = require('axios');
 
 const KNOWLEDGE_FILE = path.join(__dirname, '..', 'site-knowledge.json');
 
-const WP_BASE = () => process.env.WP_STAGING_URL;
-const wpAuth  = () => ({
-  username: process.env.WP_USERNAME,
-  password: process.env.WP_APP_PASSWORD,
-});
+const WP_BASE    = () => process.env.WP_STAGING_URL;
+const wpAuth     = () => ({ username: process.env.WP_USERNAME, password: process.env.WP_APP_PASSWORD });
+const agentHdrs  = () => ({ 'X-Agent-Token': process.env.AGENT_TOKEN || '' });
 
 // ── Main builder ──────────────────────────────────────────────────────────────
 
@@ -36,7 +34,7 @@ async function buildKnowledge() {
   try {
     const res = await axios.get(
       `${WP_BASE()}/wp-json/brinda-agent/v1/site-info`,
-      { auth: wpAuth(), timeout: 30000 }
+      { headers: agentHdrs(), timeout: 30000 }
     );
     siteInfo = res.data;
   } catch (err) {

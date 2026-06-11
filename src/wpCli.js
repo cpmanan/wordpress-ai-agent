@@ -8,18 +8,16 @@
 
 const axios = require('axios');
 
-const WP_BASE = process.env.WP_STAGING_URL;
-const wpAuth  = {
-  username: process.env.WP_USERNAME,
-  password: process.env.WP_APP_PASSWORD,
-};
+const WP_BASE   = process.env.WP_STAGING_URL;
+const wpAuth    = { username: process.env.WP_USERNAME, password: process.env.WP_APP_PASSWORD };
+const agentHdrs = () => ({ 'X-Agent-Token': process.env.AGENT_TOKEN || '' });
 
 // ── Core REST helper ──────────────────────────────────────────────────────
 
 async function agentApi(method, path, data = null) {
   const url = `${WP_BASE}/wp-json/brinda-agent/v1/${path}`;
   try {
-    const res = await axios({ method, url, auth: wpAuth, data, timeout: 30000 });
+    const res = await axios({ method, url, headers: agentHdrs(), data, timeout: 30000 });
     return res.data;
   } catch (err) {
     const msg = err.response?.data?.message || err.message;

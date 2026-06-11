@@ -10,9 +10,10 @@
  * Returns a structured PageMap that GPT uses to choose the right approach.
  */
 
-const axios   = require('axios');
-const WP_BASE = () => process.env.WP_STAGING_URL;
-const wpAuth  = () => ({ username: process.env.WP_USERNAME, password: process.env.WP_APP_PASSWORD });
+const axios      = require('axios');
+const WP_BASE    = () => process.env.WP_STAGING_URL;
+const wpAuth     = () => ({ username: process.env.WP_USERNAME, password: process.env.WP_APP_PASSWORD });
+const agentHdrs  = () => ({ 'X-Agent-Token': process.env.AGENT_TOKEN || '' });
 
 // ── CPT shortcode → WP post_type mapping ─────────────────────────────────────
 const CPT_WIDGET_MAP = {
@@ -28,7 +29,7 @@ async function getElementorJson(postId) {
   try {
     const res = await axios.get(
       `${WP_BASE()}/wp-json/brinda-agent/v1/elementor-data`,
-      { auth: wpAuth(), params: { post_id: postId }, timeout: 20000 }
+      { headers: agentHdrs(), params: { post_id: postId }, timeout: 20000 }
     );
     const raw = res.data?.elementor_data;
     if (!raw || raw === '') return null;
@@ -102,7 +103,7 @@ async function getCptPostsInCategory(cptType, catId) {
   try {
     const res = await axios.get(
       `${WP_BASE()}/wp-json/brinda-agent/v1/cpt-posts`,
-      { auth: wpAuth(), params: { post_type: cptType, cat_id: catId }, timeout: 15000 }
+      { headers: agentHdrs(), params: { post_type: cptType, cat_id: catId }, timeout: 15000 }
     );
     return (res.data?.posts || []).map(p => ({
       id:     p.id,
