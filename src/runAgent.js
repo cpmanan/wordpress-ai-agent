@@ -1055,7 +1055,11 @@ add_action('rest_api_init', function() {
             if (el.elType === 'widget') {
               const s = el.settings || {};
               for (const field of ['title', 'editor', 'text', 'description', 'caption']) {
-                if (s[field]) { widgets.push({ widgetType: el.widgetType, field, text: String(s[field]).replace(/<[^>]+>/g, '').substring(0, 150) }); break; }
+                if (s[field]) {
+                  // Keep raw value including HTML — GPT must return exact text so string replacement works
+                  widgets.push({ widgetType: el.widgetType, field, text: String(s[field]).substring(0, 200) });
+                  break;
+                }
               }
             }
             if (el.elements?.length) widgets.push(...flattenWidgets(el.elements));
@@ -1073,12 +1077,15 @@ add_action('rest_api_init', function() {
             {
               role: 'system',
               content: `You are an Elementor editor assistant. Given a list of text widgets and a task, identify the one to change.
+
+CRITICAL: The "old_text" field must be COPIED EXACTLY from the "text" value in the widget list — including any HTML tags, special characters, or whitespace. Do not clean, decode, or modify it in any way. This exact string must exist in the raw JSON.
+
 Return JSON: {
   "changed": true or false,
   "widget_type": "the widgetType value",
   "field": "title|editor|text|description",
-  "old_text": "the EXACT current text value from the list (copy it exactly, including HTML tags)",
-  "new_text": "the replacement text",
+  "old_text": "EXACT copy of the text value from the list — do not modify",
+  "new_text": "the replacement text (plain text, no extra HTML unless requested)",
   "what_changed": "brief description"
 }`
             },
