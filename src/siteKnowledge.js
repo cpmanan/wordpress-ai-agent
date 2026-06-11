@@ -88,7 +88,21 @@ async function buildKnowledge() {
     console.log(`  ✅ Custom code: ${codeKeys.join(', ') || 'none'}`);
   } catch (e) {
     console.warn(`  ⚠️  Extended info fetch failed: ${e.message.split('\n')[0]}`);
-    kb.db_schema = []; kb.plugin_configs = []; kb.custom_code = {};
+    // Fall back to the committed db-schema.sql file for table structure
+    const schemaFile = path.join(__dirname, '..', 'db-schema.sql');
+    if (fs.existsSync(schemaFile)) {
+      const sql = fs.readFileSync(schemaFile, 'utf8');
+      const tableMatches = [...sql.matchAll(/CREATE TABLE `(\w+)` \(([\s\S]*?)\);/g)];
+      kb.db_schema = tableMatches.map(m => ({
+        table:   m[1],
+        is_core: m[1].match(/^wp_(commentmeta|comments|links|options|postmeta|posts|term_|termmeta|terms|usermeta|users)/) ? true : false,
+        columns: [...m[2].matchAll(/`(\w+)` (\w+)/g)].map(c => ({ name: c[1], type: c[2] })),
+      }));
+      console.log(`  ✅ DB schema loaded from committed db-schema.sql (${kb.db_schema.length} tables)`);
+    } else {
+      kb.db_schema = [];
+    }
+    kb.plugin_configs = []; kb.custom_code = {};
   }
 
   fs.writeFileSync(KNOWLEDGE_FILE, JSON.stringify(kb, null, 2));
