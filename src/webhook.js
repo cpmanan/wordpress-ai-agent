@@ -13,6 +13,13 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const PROJECT_KEY = process.env.JIRA_PROJECT_KEY;
 
+// Only process tickets assigned to this Jira user (cursor@commercepundit.com — "AI agent")
+const AGENT_ASSIGNEE_ID = process.env.AGENT_ASSIGNEE_ID || '712020:b5fbdd2a-2aba-4b55-91db-bcfed95a14a5';
+
+function isAssignedToAgent(issue) {
+  return issue?.fields?.assignee?.accountId === AGENT_ASSIGNEE_ID;
+}
+
 // Exact Jira transition names (confirmed via API)
 const STATUS = {
   INBOX:       'To Do',       // new issues land here
@@ -83,14 +90,26 @@ app.post('/webhook/jira', async (req, res) => {
 
   try {
 
-    // ── 1. New issue created → agent picks it up ───────────────────
+    // ── 1. New issue created → agent picks it up (only if assigned to AI Agent) ─
     if (webhookEvent === 'jira:issue_created') {
-      console.log(`📥 New issue: ${issueKey} — Status: ${currentStatus}`);
+      console.log(`📥 New issue: ${issueKey} — Status: ${currentStatus} | Assignee: ${issue.fields?.assignee?.displayName || 'unassigned'}`);
+      if (!isAssignedToAgent(issue)) {
+        console.log(`⏭️  Skipping ${issueKey} — not assigned to AI Agent`);
+        return;
+      }
       await runAgent(issueKey);
     }
 
-    // ── 2. Issue status changed ────────────────────────────────────
+    // ── 2. Issue updated ───────────────────────────────────────────
     if (webhookEvent === 'jira:issue_updated' && changelog) {
+      // ── Assignee changed to AI Agent → auto-trigger ─────────────
+      const assigneeChange = changelog.items?.find(i => i.field === 'assignee');
+      if (assigneeChange && assigneeChange.to === AGENT_ASSIGNEE_ID) {
+        console.log(`🤖 ${issueKey} assigned to AI Agent — auto-triggering`);
+        await runAgent(issueKey);
+        return;
+      }
+
       const statusChange = changelog.items?.find(i => i.field === 'status');
 
       if (statusChange) {
@@ -180,8 +199,13 @@ app.post('/webhook/jira', async (req, res) => {
 
       // ── run — manually re-trigger agent ─────────────────────────
       if (commentText === 'run') {
-        console.log(`▶️  Manual run triggered on: ${issueKey}`);
-        await runAgent(issueKey);
+        if (!isAssignedToAgent(issue)) {
+          console.log(`⏭️  Ignoring "run" on ${issueKey} — not assigned to AI Agent`);
+          await addComment(issueKey, `⚠️ This ticket is not assigned to the AI Agent. Please assign it to "AI agent" (cursor@commercepundit.com) first.`);
+        } else {
+          console.log(`▶️  Manual run triggered on: ${issueKey}`);
+          await runAgent(issueKey);
+        }
       }
 
       // ── section: <N> — answer to agent's section clarification question ──
