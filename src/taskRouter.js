@@ -16,7 +16,7 @@ const TYPE_DESCRIPTIONS = {
   content:     'Create or update WordPress posts or pages — blog articles, blog creation, write a blog post, text content on a page, phone number, address, contact info. Use this for any task that asks to write or create a new blog.',
   nav:         'Navigation menu changes — add, remove, or reorder menu items or links',
   seo:         'Yoast SEO meta title, meta description, focus keyword, search engine optimization',
-  elementor:   'Elementor page builder edits — headings, hero text, sections, widgets, gallery images on pages built with Elementor',
+  elementor:   'Edit an EXISTING page that was built with Elementor — change headings, hero text, sections, widgets, gallery images. ONLY use this when editing an existing Elementor page. If the task is creating a NEW page, post, or blog, use "content" instead.',
   plugin:      'Install, activate, or deactivate a WordPress plugin',
   backup:      'Update a WordPress plugin or core to a newer version (always needs a backup checkpoint first)',
   woocommerce: 'WooCommerce product edits — price, description, short description, image, stock for a specific product',
@@ -124,7 +124,13 @@ function detectTaskType(title, description = '') {
   const STRONG_FILE_SIGNALS = ['style.css', 'functions.php', 'child theme', 'font-family', 'css file', '.css', 'php file'];
   if (STRONG_FILE_SIGNALS.some(k => text.includes(k)))   return TASK_TYPES.FILE;
 
-  if (ELEMENTOR_KEYWORDS.some(k => text.includes(k)))    return TASK_TYPES.ELEMENTOR;
+  // ELEMENTOR is only for editing EXISTING pages built with Elementor.
+  // If the task is asking to CREATE something new, always use CONTENT instead.
+  const NEW_CONTENT_INTENT = /\b(create|write|publish|add|make|build)\b.{0,30}\b(new|a|one)\b.{0,30}\b(page|post|blog|article|content)\b/;
+  const isCreatingNew = NEW_CONTENT_INTENT.test(text)
+    || /\b(new page|new post|new blog|new article|create page|create post|create blog)\b/.test(text);
+
+  if (!isCreatingNew && ELEMENTOR_KEYWORDS.some(k => text.includes(k))) return TASK_TYPES.ELEMENTOR;
   if (CONTENT_KEYWORDS.some(k => text.includes(k)))      return TASK_TYPES.CONTENT;
   if (FILE_KEYWORDS.some(k => text.includes(k)))         return TASK_TYPES.FILE;
 
