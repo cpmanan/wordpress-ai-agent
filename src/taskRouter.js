@@ -13,7 +13,7 @@ const TASK_TYPES = {
 // ── Type descriptions fed to GPT for AI classification ───────────────────────
 const TYPE_DESCRIPTIONS = {
   file:        'CSS styling, font changes, color changes, PHP/theme file edits, child theme, style.css, functions.php, responsive/layout changes',
-  content:     'Create or update WordPress posts or pages, blog articles, text content on a page, phone number, address, contact info',
+  content:     'Create or update WordPress posts or pages — blog articles, blog creation, write a blog post, text content on a page, phone number, address, contact info. Use this for any task that asks to write or create a new blog.',
   nav:         'Navigation menu changes — add, remove, or reorder menu items or links',
   seo:         'Yoast SEO meta title, meta description, focus keyword, search engine optimization',
   elementor:   'Elementor page builder edits — headings, hero text, sections, widgets, gallery images on pages built with Elementor',
@@ -112,8 +112,14 @@ function detectTaskType(title, description = '') {
   if (SEO_KEYWORDS.some(k => text.includes(k)))          return TASK_TYPES.SEO;
   if (WOOCOMMERCE_KEYWORDS.some(k => text.includes(k)))  return TASK_TYPES.WOOCOMMERCE;
 
-  const BLOG_POST_SIGNALS = ['blog post', 'write post', 'new post', 'create post', 'write a post', 'write blog', 'new blog'];
+  const BLOG_POST_SIGNALS = [
+    'blog post', 'write post', 'new post', 'create post', 'write a post',
+    'write blog', 'new blog', 'blog creation', 'create a blog', 'create one blog',
+    'create blog', 'write the blog', 'publish blog', 'publish a blog',
+  ];
   if (BLOG_POST_SIGNALS.some(k => text.includes(k)))     return TASK_TYPES.CONTENT;
+  // catch bare "blog" only when paired with create/write/publish intent
+  if (/\b(create|write|publish|add|make)\b.{0,20}\bblog\b/.test(text)) return TASK_TYPES.CONTENT;
 
   const STRONG_FILE_SIGNALS = ['style.css', 'functions.php', 'child theme', 'font-family', 'css file', '.css', 'php file'];
   if (STRONG_FILE_SIGNALS.some(k => text.includes(k)))   return TASK_TYPES.FILE;
