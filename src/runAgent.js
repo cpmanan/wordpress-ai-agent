@@ -1,6 +1,6 @@
 const axios  = require('axios');
 const OpenAI = require('openai');
-const { detectTaskType, TASK_TYPES } = require('./taskRouter');
+const { detectTaskType, detectTaskTypeWithAI, TASK_TYPES } = require('./taskRouter');
 const { getIssue, addComment, setRevertMeta, transitionIssue, getRevertMeta, getIssueImages } = require('./jira');
 const { cloneRepo, getCurrentSha, readFile, readAgentContext, editFile, commitAndDeploy, purgeCache, cleanup, pollPipelineUntilDone } = require('./wpEngineDeploy');
 const { getParentThemeContext } = require('./viharaContext');
@@ -91,7 +91,7 @@ async function runAgent(issueKey, feedbackContext = null, forcedTaskType = null)
   }
 
   // 3. Detect task type (can be overridden when re-routing e.g. content → elementor)
-  const taskType = forcedTaskType || detectTaskType(title, description);
+  const taskType = forcedTaskType || await detectTaskTypeWithAI(title, description, getOpenAI());
   console.log(`🔍 Detected task type: ${taskType}${forcedTaskType ? ' (forced)' : ''}`);
 
   // 3b. Load site knowledge base — build it if missing or stale (>24h)
