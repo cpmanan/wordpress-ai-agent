@@ -158,6 +158,42 @@ function rememberErrorPattern(errorSignature, context, fix, issueKey) {
   console.log(`🧠 Remembered error pattern: "${errorSignature}" → fix: ${fix}`);
 }
 
+// ── Record redo pattern — what went wrong on first attempt ───────────────────
+// Called when user posts redo: <feedback>, stores lesson for similar future tasks
+function recordRedoPattern(issueKey, taskTitle, taskType, pageId, redoFeedback) {
+  const mem = loadMemory();
+  if (!mem.redo_patterns) mem.redo_patterns = [];
+  // Avoid exact duplicates from the same issue
+  if (mem.redo_patterns.find(r => r.issue === issueKey)) return;
+  mem.redo_patterns.unshift({
+    issue:         issueKey,
+    task_title:    taskTitle.substring(0, 100),
+    task_type:     taskType,
+    page_id:       pageId || null,
+    redo_feedback: redoFeedback.substring(0, 200),
+    date:          new Date().toISOString(),
+  });
+  mem.redo_patterns = mem.redo_patterns.slice(0, 30);
+  saveMemory(mem);
+  console.log(`🧠 Recorded redo pattern: "${redoFeedback.substring(0, 60)}" (${taskType})`);
+}
+
+// ── Build redo patterns context string for GPT ────────────────────────────────
+function getRedoContext(taskType, pageId) {
+  const mem = loadMemory();
+  if (!mem.redo_patterns?.length) return '';
+  // Filter to same task type and/or same page
+  const relevant = mem.redo_patterns.filter(r =>
+    r.task_type === taskType || (pageId && r.page_id === pageId)
+  ).slice(0, 5);
+  if (!relevant.length) return '';
+  const lines = ['\n### Past Redo Corrections (first attempt failed — avoid repeating these mistakes)'];
+  relevant.forEach(r => {
+    lines.push(`  • [${r.task_type}${r.page_id ? ` page:${r.page_id}` : ''}] "${r.task_title}" — user said: "${r.redo_feedback}"`);
+  });
+  return lines.join('\n');
+}
+
 // ── Record user correction (section: N or page: N reply) ─────────────────────
 // When user corrects agent's guess, store so agent avoids same mistake
 function recordCorrection(issueKey, taskText, wrongChoice, correctChoice, type) {
@@ -258,6 +294,8 @@ module.exports = {
   recordOutcome,
   rememberErrorPattern,
   recordCorrection,
+  recordRedoPattern,
+  getRedoContext,
   recallPage,
   getMemoryContext,
   getErrorContext,

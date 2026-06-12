@@ -9,7 +9,7 @@ const { createPost, updatePost, getPost, createPage, updatePage, getPage, search
 const { revertTask } = require('./revert');
 const { getPlugins, installPlugin, deactivatePlugin, updateYoastSeo, exportDb } = require('./wpCli');
 const { getKnowledge, getContextForTask, isStale, buildKnowledge } = require('./siteKnowledge');
-const { recallPage, rememberPage, rememberWidgetLearning, rememberQuirk, recordOutcome, rememberErrorPattern, recordCorrection, getMemoryContext } = require('./agentMemory');
+const { recallPage, rememberPage, rememberWidgetLearning, rememberQuirk, recordOutcome, rememberErrorPattern, recordCorrection, recordRedoPattern, getRedoContext, getMemoryContext } = require('./agentMemory');
 const { createBackup, isConfigured: wpEngineConfigured } = require('./wpEngine');
 
 // Initialize lazily so missing key doesn't crash the server at startup
@@ -24,9 +24,10 @@ function getOpenAI() {
  * kbCtx comes from getContextForTask() — injected into every GPT call
  * so the model knows exact page IDs, menu names, plugin states, etc.
  */
-function withKb(systemContent, kbCtx) {
-  if (!kbCtx) return systemContent;
-  return `${kbCtx}\n\n---\n\n${systemContent}`;
+function withKb(systemContent, kbCtx, extraCtx = '') {
+  const parts = [kbCtx, extraCtx].filter(Boolean).join('\n\n');
+  if (!parts) return systemContent;
+  return `${parts}\n\n---\n\n${systemContent}`;
 }
 
 // ── Module-level helpers (used by both runAgent and redoTask) ─────────────────
@@ -111,6 +112,7 @@ async function runAgent(issueKey, feedbackContext = null, forcedTaskType = null)
   }
   let kbContext     = siteKb ? getContextForTask(taskType, siteKb) : '';
   const memoryContext = getMemoryContext();
+  const redoContext   = getRedoContext(taskType, null);
 
   // ── Smart page-based type resolution ─────────────────────────────────────
   // For CONTENT/ELEMENTOR tasks: look up the actual target page and check if
@@ -398,6 +400,24 @@ Return JSON exactly like this:
         let contentIsPage = !isBlogPost;
         let action = 'create';
 
+        // Confidence gate: if task implies editing an existing page but we couldn't find it,
+        // ask for confirmation rather than silently creating a new one
+        const impliesEdit = /\b(update|change|edit|modify|fix|replace|rewrite|add to|remove from)\b/i.test(title + ' ' + description);
+        if (!isBlogPost && !existingPage && impliesEdit) {
+          await addComment(issueKey,
+            `⚠️ *Confidence check — action required*\n\n` +
+            `I couldn't find a matching page for: _"${title}"_\n\n` +
+            `Options:\n` +
+            `• Reply \`page: <ID>\` to specify the exact page ID\n` +
+            `• Reply \`run\` to create a new page instead\n` +
+            `• Reply \`redo: <correction>\` to clarify the task\n\n` +
+            `You can find page IDs at: [WP Admin → Pages|${process.env.WP_STAGING_URL}/wp-admin/edit.php?post_type=page]`
+          );
+          await transitionIssue(issueKey, 'In Review');
+          recordOutcome(issueKey, title, 'content', 'clarification_needed', { note: 'page not found, confidence gate triggered' });
+          break;
+        }
+
         if (existingPage) {
           // ── UPDATE existing page ──────────────────────────────────
           postId = existingPage.id;
@@ -456,7 +476,7 @@ Return JSON: {
           const aiResponse = await getOpenAI().chat.completions.create({
             model: 'gpt-4o',
             messages: [
-              { role: 'system', content: withKb(systemPrompt, kbContext) },
+              { role: 'system', content: withKb(systemPrompt, kbContext, redoContext) },
               {
                 role: 'user',
                 content: isFullReplace
@@ -2454,7 +2474,7 @@ Return JSON: {
   },
   "image_search_query": "search query for product image (omit if no image change needed)",
   "what_changed": "brief description"
-}`, kbContext) },
+}`, kbContext, redoContext) },
             { role: 'user', content: `Task: ${title}\n\nDetails: ${description}` }
           ],
           response_format: { type: 'json_object' }
@@ -2628,6 +2648,12 @@ async function redoTask(issueKey, feedback) {
 
     // Get revert metadata to find the page/post that was previously edited
     const meta = await getRevertMeta(issueKey);
+
+    // Record what the user said was wrong — future tasks of the same type/page learn from this
+    if (meta) {
+      const redoIssue = await getIssue(issueKey).catch(() => null);
+      recordRedoPattern(issueKey, redoIssue?.fields?.summary || issueKey, meta.type, meta.postId || meta.pageId, feedback);
+    }
 
     if (!meta) {
       await addComment(issueKey,
