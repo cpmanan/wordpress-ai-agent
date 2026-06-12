@@ -82,11 +82,12 @@ const ELEMENTOR_KEYWORDS = [
 ];
 
 const WOOCOMMERCE_KEYWORDS = [
-  'product', 'woocommerce', 'shop', 'store', 'price', 'pricing',
+  'product', 'woocommerce', 'price', 'pricing',
   'product description', 'product image', 'product title', 'product name',
   'add product', 'edit product', 'update product', 'product category',
   'sale price', 'regular price', 'stock', 'inventory', 'sku',
-  'product page', 'shop page', 'cart', 'checkout',
+  'product page', 'cart', 'checkout',
+  // NOTE: 'shop', 'shop page', 'store' removed — too ambiguous, triggers on NAV tasks
 ];
 
 function detectTaskType(title, description = '') {
@@ -105,17 +106,23 @@ function detectTaskType(title, description = '') {
   if (/\b(install|activate|deactivate|disable|enable|remove)\b.{0,40}\bplugin\b/.test(text)) return TASK_TYPES.PLUGIN;
   if (PLUGIN_KEYWORDS.some(k => text.includes(k)))       return TASK_TYPES.PLUGIN;
 
-  // Domain-specific CPT types before generic content
-  if (WOOCOMMERCE_KEYWORDS.some(k => text.includes(k)))  return TASK_TYPES.WOOCOMMERCE;
-
-  // Nav before content — "create page and add to nav" should be NAV
+  // Nav before WooCommerce — "add shop page to menu" should be NAV, not WooCommerce
   if (NAV_KEYWORDS.some(k => text.includes(k)))          return TASK_TYPES.NAV;
 
+  // SEO before WooCommerce — prevents false WC matches on SEO tasks
   if (SEO_KEYWORDS.some(k => text.includes(k)))          return TASK_TYPES.SEO;
 
-  // Explicit blog/post creation signals always → CONTENT (even if description mentions "paragraph" etc.)
+  // WooCommerce — product-specific keywords only (shop/store removed to avoid NAV/SEO collisions)
+  if (WOOCOMMERCE_KEYWORDS.some(k => text.includes(k)))  return TASK_TYPES.WOOCOMMERCE;
+
+  // Explicit blog/post creation signals always → CONTENT
   const BLOG_POST_SIGNALS = ['blog post', 'write post', 'new post', 'create post', 'write a post', 'write blog', 'new blog'];
   if (BLOG_POST_SIGNALS.some(k => text.includes(k)))     return TASK_TYPES.CONTENT;
+
+  // Strong FILE signals (explicit CSS/PHP file markers) before CONTENT
+  // Prevents "change the... css/style.css/child theme" routing to CONTENT → ELEMENTOR
+  const STRONG_FILE_SIGNALS = ['style.css', 'functions.php', 'child theme', 'font-family', 'css file', '.css', 'php file'];
+  if (STRONG_FILE_SIGNALS.some(k => text.includes(k)))   return TASK_TYPES.FILE;
 
   // ELEMENTOR before CONTENT — "update heading via elementor" is Elementor, not content
   if (ELEMENTOR_KEYWORDS.some(k => text.includes(k)))    return TASK_TYPES.ELEMENTOR;
