@@ -124,13 +124,7 @@ function detectTaskType(title, description = '') {
   const STRONG_FILE_SIGNALS = ['style.css', 'functions.php', 'child theme', 'font-family', 'css file', '.css', 'php file'];
   if (STRONG_FILE_SIGNALS.some(k => text.includes(k)))   return TASK_TYPES.FILE;
 
-  // ELEMENTOR is only for editing EXISTING pages built with Elementor.
-  // If the task is asking to CREATE something new, always use CONTENT instead.
-  const NEW_CONTENT_INTENT = /\b(create|write|publish|add|make|build)\b.{0,30}\b(new|a|one)\b.{0,30}\b(page|post|blog|article|content)\b/;
-  const isCreatingNew = NEW_CONTENT_INTENT.test(text)
-    || /\b(new page|new post|new blog|new article|create page|create post|create blog)\b/.test(text);
-
-  if (!isCreatingNew && ELEMENTOR_KEYWORDS.some(k => text.includes(k))) return TASK_TYPES.ELEMENTOR;
+  if (ELEMENTOR_KEYWORDS.some(k => text.includes(k))) return TASK_TYPES.ELEMENTOR;
   if (CONTENT_KEYWORDS.some(k => text.includes(k)))      return TASK_TYPES.CONTENT;
   if (FILE_KEYWORDS.some(k => text.includes(k)))         return TASK_TYPES.FILE;
 
@@ -139,18 +133,19 @@ function detectTaskType(title, description = '') {
 
 // ── AI-powered task type detection ───────────────────────────────────────────
 // Uses GPT-4o-mini to understand intent from natural language.
+// Returns { type, isNewContent } so callers don't need regex to guess intent.
 // Falls back to keyword matching if AI is unavailable or returns unknown type.
 async function detectTaskTypeWithAI(title, description = '', openai) {
   const validTypes = Object.values(TASK_TYPES);
 
   // Fast-path: revert is always unambiguous
   if (`${title} ${description}`.toLowerCase().includes('revert')) {
-    return TASK_TYPES.REVERT;
+    return { type: TASK_TYPES.REVERT, isNewContent: false };
   }
 
   if (!openai) {
     console.log(`🔍 No OpenAI client — using keyword detection`);
-    return detectTaskType(title, description);
+    return { type: detectTaskType(title, description), isNewContent: false };
   }
 
   try {
@@ -169,7 +164,12 @@ async function detectTaskTypeWithAI(title, description = '', openai) {
 Classify the task into exactly one of these types:
 ${typeList}
 
-Return JSON only: { "type": "<type>", "confidence": 0.0-1.0, "reason": "one sentence" }`
+Also determine the action intent:
+- "action": "create" — task wants to CREATE something new (new blog post, new page, new product)
+- "action": "edit" — task wants to EDIT or UPDATE an existing item
+- "action": "other" — neither (plugin install, backup, revert, etc.)
+
+Return JSON only: { "type": "<type>", "action": "create|edit|other", "confidence": 0.0-1.0, "reason": "one sentence" }`
         },
         {
           role: 'user',
@@ -182,8 +182,9 @@ Return JSON only: { "type": "<type>", "confidence": 0.0-1.0, "reason": "one sent
     const result = JSON.parse(res.choices[0].message.content);
 
     if (validTypes.includes(result.type)) {
-      console.log(`🤖 AI task type: "${result.type}" (confidence: ${result.confidence}) — ${result.reason}`);
-      return result.type;
+      const isNewContent = result.action === 'create';
+      console.log(`🤖 AI task type: "${result.type}" action="${result.action}" (confidence: ${result.confidence}) — ${result.reason}`);
+      return { type: result.type, isNewContent };
     }
 
     console.warn(`⚠️ AI returned unknown type "${result.type}" — falling back to keywords`);
@@ -191,7 +192,7 @@ Return JSON only: { "type": "<type>", "confidence": 0.0-1.0, "reason": "one sent
     console.warn(`⚠️ AI task detection failed: ${err.message} — falling back to keywords`);
   }
 
-  return detectTaskType(title, description);
+  return { type: detectTaskType(title, description), isNewContent: false };
 }
 
 module.exports = { detectTaskType, detectTaskTypeWithAI, TASK_TYPES, WOOCOMMERCE_KEYWORDS };

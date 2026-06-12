@@ -90,9 +90,17 @@ async function runAgent(issueKey, feedbackContext = null, forcedTaskType = null)
     await addComment(issueKey, `🤖 Agent started working on: "${title}"`);
   }
 
-  // 3. Detect task type (can be overridden when re-routing e.g. content → elementor)
-  const taskType = forcedTaskType || await detectTaskTypeWithAI(title, description, getOpenAI());
-  console.log(`🔍 Detected task type: ${taskType}${forcedTaskType ? ' (forced)' : ''}`);
+  // 3. Detect task type + action intent via AI (or keyword fallback)
+  let taskType, isNewContent;
+  if (forcedTaskType) {
+    taskType = forcedTaskType;
+    isNewContent = false; // re-routes are never "new content creation"
+  } else {
+    const detected = await detectTaskTypeWithAI(title, description, getOpenAI());
+    taskType = detected.type;
+    isNewContent = detected.isNewContent;
+  }
+  console.log(`🔍 Detected task type: ${taskType}${forcedTaskType ? ' (forced)' : ''} | new content: ${isNewContent}`);
 
   // 3b. Load site knowledge base — build it if missing or stale (>24h)
   let siteKb = getKnowledge();
@@ -117,10 +125,9 @@ async function runAgent(issueKey, feedbackContext = null, forcedTaskType = null)
   // ── Smart page-based type resolution ─────────────────────────────────────
   // For CONTENT/ELEMENTOR tasks: look up the actual target page and check if
   // it uses Elementor — then override taskType based on ground truth, not keywords.
-  // Skip for blog/post creation tasks (no target page to look up).
+  // Skip when AI says this is a new-content creation task (no target page to look up).
   let resolvedTaskType = taskType;
-  const isCreationTask = /\b(write|create|new|add|make|publish)\b.{0,30}\b(post|blog|article|page)\b/i.test(`${title} ${description}`)
-    || /\bblog creation\b/i.test(`${title} ${description}`);
+  const isCreationTask = isNewContent; // determined by AI, not regex
 
   if (!forcedTaskType && !isCreationTask && (taskType === TASK_TYPES.CONTENT || taskType === TASK_TYPES.ELEMENTOR) && siteKb) {
     const allPages      = siteKb.pages || [];
