@@ -119,7 +119,8 @@ async function runAgent(issueKey, feedbackContext = null, forcedTaskType = null)
   // it uses Elementor — then override taskType based on ground truth, not keywords.
   // Skip for blog/post creation tasks (no target page to look up).
   let resolvedTaskType = taskType;
-  const isCreationTask = /\b(write|create|new|add)\b.{0,20}\b(post|blog|article)\b/i.test(`${title} ${description}`);
+  const isCreationTask = /\b(write|create|new|add|make|publish)\b.{0,30}\b(post|blog|article|page)\b/i.test(`${title} ${description}`)
+    || /\bblog creation\b/i.test(`${title} ${description}`);
 
   if (!forcedTaskType && !isCreationTask && (taskType === TASK_TYPES.CONTENT || taskType === TASK_TYPES.ELEMENTOR) && siteKb) {
     const allPages      = siteKb.pages || [];
@@ -431,11 +432,12 @@ Return JSON exactly like this:
           savedContent = { title: currentTitle, content: currentContent };
 
           // Skip if page uses Elementor (content will be empty or shortcode)
+          // But never re-route if this is a NEW content creation task — create it as a standard post/page
           const isElementor = (existingPage.meta?._elementor_edit_mode === 'builder')
             || currentContent.includes('elementor')
             || currentContent.trim() === '';
 
-          if (isElementor) {
+          if (isElementor && !isCreationTask) {
             // Page is Elementor-built — re-run through ELEMENTOR path automatically
             console.log(`🔄 Page ${postId} uses Elementor — re-routing to ELEMENTOR handler`);
             await runAgent(issueKey, null, 'elementor');
